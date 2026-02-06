@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2.0.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-v2-server"
+version = "0.1.0"
+description = "Unified MCP server v2"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastmcp>=2.12.0,<3.0.0",
+  "pydantic>=2.10.0,<3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0,<9.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_v2_server"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"

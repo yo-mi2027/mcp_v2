@@ -35,6 +35,8 @@ MVP方針:
 
 - コピー元には `manual_read` と同等のガードを適用
 - `limits` 未指定時は安全デフォルト + ハードリミット適用
+- `.md` は section単位で転記する（MVPでは `written_sections=1`）
+- `.json` は file単位で転記する
 - 返却本文は含めない
 
 ### `bridge_copy_section` Output
