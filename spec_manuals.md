@@ -11,7 +11,7 @@
 - `manual_toc({ manual_id })`
 - `manual_find({ manual_id?, query, intent?, max_stage?, only_unscanned_from_trace_id?, budget? })`
 - `manual_read({ ref, scope, limits?, expand? })`
-- `manual_excepts({ manual_id, section_id? })`
+- `manual_excepts({ manual_id, node_id? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
 
 ## 3. 探索固定ルール
@@ -22,6 +22,8 @@
 - Stage 3: 参照追跡
 - Stage 3.5: 統合判断（Stage 0〜3候補の統合・矛盾/欠落判定）
 - Stage 4: 範囲拡張（条件成立時のみ）
+- Stage 2〜3 が失敗しても Stage 0〜1 の結果サマリは返す（部分成功）
+- Stage 3.5（統合判断）は部分成功時も常時実行し、利用可能候補のみで判定する
 
 `max_stage` ルール:
 
@@ -137,6 +139,8 @@ Stage 4発火条件（初期）:
 - `max_stage` 未指定は `DEFAULT_MAX_STAGE`（MVP既定: `4`）
 - `only_unscanned_from_trace_id` 指定で trace が無効なら `not_found`
 - 正規化（NFKC, 全半角, casefold, 改行/空白統一, 記号ゆらぎ吸収）を固定適用
+- Stage 2〜3 の失敗は `warnings` に集約し、Stage 0〜1 のサマリ返却と Stage 3.5 実行は継続する
+- `ref.target=manual` の返却では `ref.manual_id` を必須で含める
 
 ### `manual_find` Output
 
@@ -164,12 +168,11 @@ Stage 4発火条件（初期）:
     "gap_count": "number",
     "sufficiency_score": "number (0.0..1.0)",
     "integration_status": "ready | needs_followup | blocked",
-    "cutoff_reason": "time_budget | candidate_cap | stage_cap | hard_limit | null"
+    "cutoff_reason?": "time_budget | candidate_cap | stage_cap | hard_limit"
   },
   "next_actions": [
     {
       "type": "manual_hits|manual_read|manual_find|stop",
-      "reason": "string | null",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -182,6 +185,7 @@ Stage 4発火条件（初期）:
 - `next_actions` は必須（提案なしは `[]`）
 - `next_actions.params` は最小パラメータのみ
 - `next_actions.type` は次に呼ぶツール名を返す
+- `cutoff_reason` は打ち切り時のみ返し、打ち切りがない場合はキー自体を省略する
 - 候補一覧の取得は `type="manual_hits"` + `params.kind="candidates"`
 - 未探索一覧の取得は `type="manual_hits"` + `params.kind="unscanned"`
 - 衝突一覧の取得は `type="manual_hits"` + `params.kind="conflicts"`
@@ -189,18 +193,14 @@ Stage 4発火条件（初期）:
 - 統合上位候補の取得は `type="manual_hits"` + `params.kind="integrated_top"`
 - section読取は `type="manual_read"` + `params.scope="section"`
 - file読取は `type="manual_read"` + `params.scope="file"`
-- 統合判断からの推奨理由語彙:
-  - `insufficient_candidates`: 候補不足のため追加探索または詳細確認を推奨
-  - `resolve_conflicts`: `manual_read` で衝突候補の本文確認を優先
-  - `fill_gaps`: `manual_find` で不足観点を再探索
-  - `reduce_file_bias`: `manual_find` で偏り緩和の追加探索
-  - `manual_completed`: 十分性条件を満たしたため停止
+- 統合判断の意図は `next_actions.type` と `next_actions.params` で表現する（`reason` は使用しない）
+- 十分性条件を満たした場合は `type="stop"` を返す
 
 ### `manual_read` Input
 
 ```json
 {
-  "ref": "object (required: {target, path, start_line?, json_path?})",
+  "ref": "object (required: {target, manual_id, path, start_line?, json_path?})",
   "scope": "snippet|section|sections|file | null",
   "limits": {
     "max_sections": "number | null",
@@ -216,12 +216,14 @@ Stage 4発火条件（初期）:
 
 固定ルール:
 
-- 既定 `scope=snippet`
+- 既定 `scope` は対象形式で分岐（`.md` は `snippet`、`.json` は `file`）
+- `ref.target` は `manual` 固定
+- `ref.manual_id` は必須
 - `.md` の `scope=section` は当該見出し配下の本文（全子孫見出しを含む）を返す
 - `scope=sections` は複数sectionをまとめて返す（取得対象は `ref`/実装定義に従う）
 - `.md` の `scope=file` は `ALLOW_FILE_SCOPE=true` かつ `limits.allow_file=true` 必須
 - `.json` の `scope=file` は許可
-- `.json` の `scope=section|sections` は `invalid_scope_for_json`
+- `.json` の `scope=section|sections` は `invalid_scope`
 - `limits.max_sections` 既定: `sections=20`, `file=20`
 - `limits.max_chars` 既定: `8000`
 
@@ -244,7 +246,7 @@ Stage 4発火条件（初期）:
 ```json
 {
   "manual_id": "string (required)",
-  "section_id": "string | null"
+  "node_id": "string | null"
 }
 ```
 
@@ -304,7 +306,17 @@ Stage 4発火条件（初期）:
 }
 ```
 
-## 5. manualログ拡張（info/warn）
+## 5. エラー規約（MVP）
+
+- 本ファイルのツールエラーは `spec_v2.md` の共通エラー規約に従う
+- 代表例:
+  - `invalid_parameter`: `max_stage` が `3|4` 以外
+  - `not_found`: `only_unscanned_from_trace_id` の trace が無効
+  - `invalid_scope`: `.json` に `scope=section|sections` を指定
+  - `invalid_path` / `out_of_scope`: パス検証違反
+  - `forbidden`: `.md` の file scope 条件未充足
+
+## 6. manualログ拡張（info/warn）
 
 ### `manual_find` info
 

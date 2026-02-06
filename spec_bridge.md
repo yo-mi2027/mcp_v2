@@ -82,7 +82,17 @@ MVP方針:
 }
 ```
 
-## 4. bridgeログ拡張（info）
+## 4. エラー規約（MVP）
+
+- 本ファイルのツールエラーは `spec_v2.md` の共通エラー規約に従う
+- 代表例:
+  - `invalid_parameter`: 必須入力不足、`mode` 不正
+  - `invalid_path` / `out_of_scope`: コピー元/先パス検証違反
+  - `not_found`: `from_ref` や `from_path` の参照先不存在
+  - `invalid_scope`: 形式に不正な scope 相当指定
+  - `forbidden`: `.md` 全文転記条件（`ALLOW_FILE_SCOPE` と `limits.allow_file`）未充足
+
+## 5. bridgeログ拡張（info）
 
 - `bridge_copy_section`: `written_path`, `mode`, `written_bytes`, `written_sections`, `truncated`
 - `bridge_copy_file`: `written_path`, `mode`, `written_bytes`, `truncated`

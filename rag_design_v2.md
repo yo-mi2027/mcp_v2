@@ -18,6 +18,8 @@
 
 入力（ユーザー要求）から、探索計画（Query Plan）を作り、複数の探索戦略を合算して候補を作る。
 
+初手で `get_tooling_guide` を呼び、`first_tool` を取得してから実処理に入ってよい（任意）。
+
 1. Prompt Parse（意図・制約・重要語の抽出）
 2. Query Plan（検索語セット + 戦略セット + 見落とし検知ルール）
 3. Execute（戦略を実行し、候補を合算）
@@ -113,7 +115,7 @@ vault向け Stage 1.5（統合判断）:
 - 候補を `path + line_range` 単位で統合し、重複ヒットを集約する
 - `signal_coverage(normalized, loose)` と `file_bias_ratio` を算出する
 - `gap_ranges_count` と `sufficiency_score` を算出し、`next_actions` の初期案を生成する
-- `next_actions.reason` は `verify_coverage|fill_gaps|reduce_file_bias|vault_completed` を優先語彙として使う
+- 統合判断の意図は `next_actions.type` と `next_actions.params` で表現する
 
 ### ルーズ一致（loose）
 
@@ -135,19 +137,21 @@ vault向け Stage 1.5（統合判断）:
 
 ### 見落とし検知（Diagnose）とエスカレーション
 
-既定で Stage 0〜3.5 は実施済みとし、統合判定結果が以下の条件を満たす場合のみ Stage 4（範囲拡張）で候補集合を拡張する。
+既定で Stage 0〜3.5 は実施済みとし、以下の条件でエスカレーションする。
 
-- S0が0件
-- S0が少ない（例: 3件未満）
-- 1ファイルに偏っている（例: S0の80%以上が同一ファイル）
-- `intent=exceptions` で例外ヒットが0
-- `conflict_count > 0`（要追加読取または追加探索）
-- `gap_count > 0`（未カバー観点あり）
+- Stage 4 の初期発火条件（固定）:
+  - S0が0件
+  - S0が少ない（例: 3件未満）
+  - 1ファイルに偏っている（例: S0の80%以上が同一ファイル）
+  - `intent=exceptions` で例外ヒットが0
+- 統合判断由来の追加条件:
+  - `conflict_count > 0`（要追加読取または追加探索）
+  - `gap_count > 0`（未カバー観点あり）
 
 エスカレーションの打ち手（順序固定）:
 
-1. `conflict_count > 0` の場合は `manual_read(scope="section")` を優先提案（`reason=resolve_conflicts`）
-2. `gap_count > 0` または偏り過多の場合は `manual_find` 再探索を提案（`reason=fill_gaps|reduce_file_bias`）
+1. `conflict_count > 0` の場合は `manual_read(scope="section")` を優先提案
+2. `gap_count > 0` または偏り過多の場合は `manual_find` 再探索を提案
 3. それでも不足時に Stage 4（範囲拡張）を実行
 4. 追加拡張を行う場合は `escalation_reasons` に理由を記録する
 5. `only_unscanned_from_trace_id` 指定時は、未探索セクションの回収を優先し、全体拡張は必要時のみ行う
@@ -155,7 +159,7 @@ vault向け Stage 1.5（統合判断）:
 vault側の Diagnose:
 
 - `vault_find` は Stage 1.5 後に、`gap_ranges_count > 0` なら `vault_scan` を優先提案する
-- `file_bias_ratio` が閾値超過なら `rerun_vault_find` を提案し、探索範囲/条件を調整する
+- `file_bias_ratio` が閾値超過なら `vault_find` の再実行を提案し、探索範囲/条件を調整する
 - `sufficiency_score` が高く `gap_ranges_count = 0` の場合は `vault_coverage` または `stop` を提案する
 
 ### 出力（トークン節約の固定）
@@ -180,7 +184,7 @@ vault側の Diagnose:
 
 注意:
 
-- 「厳密一致検索」は強力だが、それだけに依存しない（抜け漏れを増やすため）。
+- 「厳密一致検索」は強力だが、それだけに依存しない（抜け漏れを減らすため）。
 - 厳密一致は“強いシグナル”として候補追加に使い、補助戦略（正規化/ルーズ/見出し補完）を必ず併用する。
 
 ## 5. 探索戦略（最低限の合成セット）
@@ -210,28 +214,15 @@ exceptions辞書に基づき、行/段落を走査して候補を生成する。
 
 ## 6. 見落とし検知（自動エスカレーション）
 
-manual側 Diagnose:
+本章の Diagnose ルールは、重複定義を避けるため 3章の以下に一本化する。
 
-- 既定で Stage 0〜3.5 は実施済みとし、統合判定結果が以下の条件を満たす場合のみ Stage 4（範囲拡張）で候補集合を拡張する。
-  - S0が0件
-  - S0が少ない（例: 3件未満）
-  - 1ファイルに偏っている（例: S0の80%以上が同一ファイル）
-  - `intent=exceptions` で例外ヒットが0
-  - `conflict_count > 0`
-  - `gap_count > 0`
-- エスカレーションの打ち手（順序固定）:
-  1. `conflict_count > 0` の場合は `manual_read(scope="section")` を優先提案（`reason=resolve_conflicts`）
-  2. `gap_count > 0` または偏り過多の場合は `manual_find` 再探索を提案（`reason=fill_gaps|reduce_file_bias`）
-  3. それでも不足時に Stage 4（範囲拡張）を実行
-  4. 追加拡張を行う場合は `escalation_reasons` に理由を記録する
-  5. `only_unscanned_from_trace_id` 指定時は、未探索セクションの回収を優先し、全体拡張は必要時のみ行う
+- manual側: 「見落とし検知（Diagnose）とエスカレーション」（3章）
+- vault側: 「vault側の Diagnose」（3章）
 
-vault側 Diagnose:
+固定方針:
 
-- 既定で Stage 0〜1.5 は実施済みとし、統合判定結果に基づいて次アクションを提案する。
-- `gap_ranges_count > 0` なら `vault_scan` を優先提案する（`reason=fill_gaps`）。
-- `file_bias_ratio` が閾値超過なら `rerun_vault_find` を提案する（`reason=reduce_file_bias`）。
-- `sufficiency_score` が高く `gap_ranges_count = 0` の場合は `vault_coverage` または `stop` を提案する（`reason=verify_coverage|vault_completed`）。
+- `next_actions.type` は「次に呼ぶツール名」を返す
+- 意図や理由は `next_actions.params` と summary 指標で表現する
 
 運用最適化（軽量・永続）:
 

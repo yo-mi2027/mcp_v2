@@ -14,4 +14,5 @@
 - `spec_manuals.md`: `manual_*` 仕様（探索Stage、I/Oスキーマ）
 - `spec_vault.md`: `vault_*` / `artifact_audit` 仕様（行レンジ走査、カバレッジ監査、I/Oスキーマ）
 - `spec_bridge.md`: `bridge_*` 仕様（manual->vaultコピー、I/Oスキーマ）
+- `spec_tooling.md`: `get_tooling_guide` 仕様（固定カタログと `first_tool`）
 - `rag_design_v2.md`: RAG設計（探索ワークフロー、検索実装仕様、見落とし検知）

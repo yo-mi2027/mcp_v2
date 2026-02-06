@@ -7,6 +7,7 @@
 - `spec_manuals.md`: `manual_*` ツール仕様
 - `spec_vault.md`: `vault_*` / `artifact_audit` ツール仕様
 - `spec_bridge.md`: `bridge_*` ツール仕様
+- `spec_tooling.md`: `get_tooling_guide` 仕様
 
 ## 2. 実装ターゲット（MVP）
 
@@ -78,6 +79,7 @@
 ## 6. 共通オーケストレーション
 
 - 1プロンプト内で Explore -> Produce を連続実行してよい
+- 初手で `get_tooling_guide` を呼び、`first_tool` を取得してから実処理に入ってよい
 - manual探索では `manual_find` 内で Stage 0〜3 実行後に Stage 3.5（統合判断）を行い、`next_actions` を確定する
 - vault探索では `vault_find` 内で Stage 0〜1 実行後に Stage 1.5（統合判断）を行い、`next_actions` を確定する
 - vaultの抜け漏れ疑いでは `vault_find -> vault_scan -> vault_coverage -> artifact_audit` を段階実行する
@@ -99,7 +101,6 @@
 ```json
 {
   "type": "string",
-  "reason": "string | null",
   "confidence": "number (0.0..1.0) | null",
   "params": "object | null"
 }
@@ -109,9 +110,25 @@
 
 - `params` は次呼び出しに必要な最小値のみ含める
 - 停止判定時は `type="stop"`
-- `stop.reason` は共通語彙 `completed|no_action_needed|blocked` を基本とする
-- `manual_find` では `manual_completed|insufficient_candidates|resolve_conflicts|fill_gaps|reduce_file_bias` を追加で使ってよい
-- `vault` 系では `coverage_satisfied|low_marginal_gain|no_remaining_ranges|verify_coverage|fill_gaps|reduce_file_bias|vault_completed` を追加で使ってよい
+- `stop` に専用の理由語彙は設けない
+- `manual_find` / `vault` 系の十分性・不足・偏りの判断は `type` と `params` に反映する（`reason` フィールドは使わない）
+
+### 7.1 共通エラー規約（MVP）
+
+共通エラーコード:
+
+- `invalid_parameter`: 入力値が許容語彙/範囲外
+- `not_found`: 対象リソースや trace が存在しない
+- `invalid_path`: パス形式不正（絶対パス、`..` 含有など）
+- `out_of_scope`: `MANUALS_ROOT` / `VAULT_ROOT` 外を指している
+- `forbidden`: ポリシー上禁止された操作
+- `invalid_scope`: 対象形式に対して不正な scope
+- `conflict`: 前提不一致や同時更新競合
+
+固定ルール:
+
+- エラー時は `code`（上記語彙）と簡潔な `message` を必須で返す
+- 必要に応じて `details`（不足パラメータ、許容値、対象パス等）を返してよい
 
 ## 8. 共通ログ方針（MVP）
 
@@ -153,6 +170,7 @@
 ```json
 {
   "target": "manual|vault",
+  "manual_id": "string | null",
   "path": "string",
   "start_line": "number | null",
   "json_path": "string | null"
@@ -161,13 +179,17 @@
 
 一意性:
 
-- `.md`: `path + start_line`
-- `.json`: `path`
+- `.md`: `manual_id + path + start_line`
+- `.json`: `manual_id + path`
 - 見出しなし `.md`: `start_line=1`
+
+固定ルール:
+
+- `target=manual` の場合は `manual_id` 必須
+- `target=vault` の場合は `manual_id=null`
 
 任意フィールド:
 
-- `manual_id`
 - `title`
 - `signals`
 
@@ -176,3 +198,4 @@
 - manual詳細: `spec_manuals.md`
 - vault詳細: `spec_vault.md`
 - bridge詳細: `spec_bridge.md`
+- tooling詳細: `spec_tooling.md`

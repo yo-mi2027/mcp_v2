@@ -147,12 +147,11 @@
     "gap_ranges_count": "number",
     "sufficiency_score": "number (0.0..1.0)",
     "integration_status": "ready | needs_followup | blocked",
-    "cutoff_reason": "time_budget | candidate_cap | stage_cap | hard_limit | null"
+    "cutoff_reason?": "time_budget | candidate_cap | stage_cap | hard_limit"
   },
   "next_actions": [
     {
-      "type": "vault_read|vault_search|vault_scan|vault_coverage|artifact_audit|rerun_vault_find|stop",
-      "reason": "string | null",
+      "type": "vault_read|vault_search|vault_scan|vault_coverage|artifact_audit|vault_find|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -165,11 +164,9 @@
 - `next_actions` は必須（提案なしは `[]`）
 - `next_actions.params` は最小パラメータのみ
 - `next_actions.type` は次に呼ぶツール名を返す
-- 統合判断からの推奨理由語彙:
-  - `verify_coverage`: `vault_coverage` でカバー率確認へ進む
-  - `fill_gaps`: `vault_scan` で未充足レンジを優先走査する
-  - `reduce_file_bias`: `rerun_vault_find` で偏り緩和の再探索を行う
-  - `vault_completed`: 十分性条件を満たしたため停止
+- `cutoff_reason` は打ち切り時のみ返し、打ち切りがない場合はキー自体を省略する
+- 統合判断の意図は `next_actions.type` と `next_actions.params` で表現する（`reason` は使用しない）
+- 十分性条件を満たした場合は `type="stop"` を返す
 
 ### `vault_scan` Input
 
@@ -209,8 +206,7 @@
   "truncated_reason": "max_chars|chunk_end|hard_limit|none",
   "next_actions": [
     {
-      "type": "vault_scan|vault_coverage|artifact_audit|rerun_vault_scan|stop",
-      "reason": "string | null",
+      "type": "vault_scan|vault_coverage|artifact_audit|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -261,7 +257,6 @@
   "next_actions": [
     {
       "type": "vault_scan|artifact_audit|stop",
-      "reason": "string | null",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -287,6 +282,7 @@
 
 - `cited_ranges` 未指定時は `source_lines` から抽出を試行（不可なら空配列）
 - 検出: `rootless_nodes`, `orphan_branches`, `one_way_refs`
+- 用語マッピング: `rootless_node=根拠なし要素`, `orphan_branch=孤立分岐`, `one_way_ref=片方向参照`
 
 ### `artifact_audit` Output
 
@@ -303,8 +299,7 @@
   "needs_forced_full_scan": "boolean",
   "next_actions": [
     {
-      "type": "vault_scan|vault_coverage|rerun_artifact_audit|stop",
-      "reason": "string | null",
+      "type": "vault_scan|vault_coverage|artifact_audit|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -431,7 +426,17 @@
 }
 ```
 
-## 5. vaultログ拡張（info）
+## 5. エラー規約（MVP）
+
+- 本ファイルのツールエラーは `spec_v2.md` の共通エラー規約に従う
+- 代表例:
+  - `invalid_parameter`: `chunk_lines` や `limit` が許容範囲外
+  - `invalid_path` / `out_of_scope`: パス検証違反
+  - `not_found`: 対象ファイル不存在
+  - `forbidden`: `artifacts/` 配下拡張子制約違反、`artifacts/daily/` 更新ポリシー違反
+  - `conflict`: `vault_write` が既存ファイル前提に反するなど前提不一致
+
+## 6. vaultログ拡張（info）
 
 - `vault_read`: `path`, `truncated`
 - `vault_create`: `path`, `written_bytes`

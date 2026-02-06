@@ -76,7 +76,7 @@
   - ただし厳密一致のみには依存せず、必ず補助戦略（正規化/ルーズ/見出し補完等）を併用する（抜け漏れ優先）。
 - Stage 0〜3 は 1 ツールに集約し、Stage 2〜3 が失敗しても Stage 0〜1 の結果サマリは返す（部分成功）。
 - Stage 0〜3 の後に Stage 3.5（統合判断）を常時実行し、候補統合・矛盾/欠落判定・十分性評価を行う。
-- `next_actions` は Stage 3.5 の統合判断結果を起点に返す（`insufficient_candidates` / `resolve_conflicts` / `fill_gaps` / `reduce_file_bias` / `manual_completed`）。
+- `next_actions` は Stage 3.5 の統合判断結果を起点に返す（`type` は次に呼ぶツール名を返し、例: `manual_hits` / `manual_read` / `manual_find` / `stop`）。
 - 探索予算の既定は `budget.time_ms=60000`（1分）、`budget.max_candidates=200` とする。
 - 打ち切り時は `cutoff_reason` をユーザー向け summary に含め、打ち切りがない場合は省略する。
 - 打ち切りや上限制約で探索しきれなかった対象は `unscanned_sections` として扱い、`reason`（`time_budget` / `candidate_cap` / `stage_cap` / `hard_limit`）付きで識別できるようにする。
@@ -92,7 +92,7 @@
 
 - vault内の成果物を探索するため `vault_find` を用意する。
 - Stage 0〜1（正規化一致 / loose一致）を実行し、続いて Stage 1.5（統合判断）で候補統合・偏り/不足判定を行う。
-- `next_actions` は Stage 1.5 の統合判断結果を起点に返す（`verify_coverage` / `fill_gaps` / `reduce_file_bias` / `vault_completed`）。
+- `next_actions` は Stage 1.5 の統合判断結果を起点に返す（`type` は次に呼ぶツール名を返し、例: `vault_scan` / `vault_find` / `vault_coverage` / `artifact_audit` / `stop`）。
 - 探索予算の既定は `budget.time_ms=60000`（1分）、`budget.max_candidates=200` とする。
 - 運用上、日次追記ログ（例: `artifacts/daily/`）を探索から除外したい場合は、`scope.relative_dir` / `glob` で対象を限定する。
 
@@ -127,6 +127,8 @@
 - manualの特定セクション、または検索ヒット箇所（範囲）をvaultへ書き込む。
 - この操作は本文をLLMへ返さずに実行可能であること（結果は「書き込んだ先」「件数」「参照元」などのメタ情報中心）。
 - manualファイル全体を `manual_id + path` 指定で vault へ転記する経路を用意し、以後の修正はvault側で行えるようにする。
+  - `.md` の全文転記は安全制約として明示有効化を必須とする（`ALLOW_FILE_SCOPE=true` かつ `limits.allow_file=true`）。
+  - `.json` の全文転記はMVP方針で許可する（`limits.allow_file` なしで可）。
 
 ### 6.4 Vault操作
 
@@ -134,6 +136,20 @@
 - 書き込みのモード（上書き/追記）を明示する。
 - 新規作成は専用ツール（`vault_create`）で行い、上書き/追記は既存ファイルに対してのみ許可する。
 - 成果物保存先（`VAULT_ROOT/artifacts/`）では `.md` / `.json` のみ許可する。
+
+### 6.5 ツール理解ガイド（初期ステップ）
+
+- セッション初手でツール選定ミスを減らすため、`get_tooling_guide` を提供する。
+- `get_tooling_guide` は副作用を持たず、固定カタログと「最初に使う1ツール（`first_tool`）」のみを返す。
+- ガイド出力には最低限、以下を含める。
+  - `first_tool`（最初に呼ぶべきツール）
+  - `tool_name`
+  - `when_to_use`
+  - `required_inputs`（必須入力の最小セット）
+  - `safe_defaults`（安全な既定値）
+  - `common_errors`（典型失敗と回避策）
+- ツール選択（2手目以降の分岐）は LLM 側で行う。
+- トークン節約のため、`common_errors` は各ツール最大2件に制限する。
 
 ## 7. 非機能要件
 
@@ -157,7 +173,7 @@
 
 ## 8. ツール設計（案）
 
-※ツール名は衝突回避/誤用防止のため “manual_” “vault_” “bridge_” prefix を付ける（例外: `artifact_audit` は cross-domain 監査ツールとして prefix なしを許可）。
+※ツール名は衝突回避/誤用防止のため “manual_” “vault_” “bridge_” prefix を付ける（例外: `artifact_audit`, `get_tooling_guide` は prefix なしを許可）。
 ※同名ツールの多重定義はしない（例: `search_text` を manual/vault で共用しない）。
 ※命名は「動詞+目的語」を基本にする（例: `manual_find`, `vault_read`）。
 
@@ -183,6 +199,8 @@
 - Bridge（統合専用）
   - `bridge_copy_section`
   - `bridge_copy_file`
+- Tooling（導線）
+  - `get_tooling_guide`（固定カタログと `first_tool` を返す）
 - Workflow（MVP）
   - （MVPではworkflow専用ツールは作らない）
 
@@ -195,7 +213,7 @@
   - ツールレスポンスの文字数/バイト数（LLMに渡す量の代理指標）
   - “bridge転記”利用時に本文返却が起きていないこと
 - 運用最適化:
-- 軽量統計（`manual_find` 主対象 + vault網羅監査の最小集計値）に基づく Stage 4 発火率と、再現率/推定トークン量の推移を確認する
+  - 軽量統計（`manual_find` 主対象 + vault網羅監査の最小集計値）に基づく Stage 4 発火率と、再現率/推定トークン量の推移を確認する
   - 運用ポリシーは「再現率の下限を満たす範囲で推定トークン量が最小の設定を採用する（Recall下限付き最小Cost）」とする
   - 推定トークン量は `est_tokens = ceil((chars_in + chars_out) / 4)` で算出し、`est_tokens_in` / `est_tokens_out` を併記して記録する
   - 追加で `marginal_gain = added_evidence_count / added_est_tokens` を記録し、低下時の停止判定に使えること
