@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from mcp_v2_server.tools_bridge import bridge_copy_section
 from mcp_v2_server.tools_manual import manual_find, manual_hits, manual_read
-from mcp_v2_server.tools_vault import artifact_audit, vault_coverage, vault_find, vault_scan
+from mcp_v2_server.tools_vault import vault_audit, vault_coverage, vault_find, vault_scan
 
 
 def test_manual_flow_e2e(state) -> None:
@@ -30,9 +30,9 @@ def test_vault_flow_e2e(state) -> None:
     assert scan["applied_range"]["start_line"] == 1
     cov = vault_coverage(state, path="source.md", cited_ranges=[{"start_line": 1, "end_line": 3}])
     assert cov["coverage_ratio"] == 0.6
-    audit = artifact_audit(
+    audit = vault_audit(
         state,
-        artifact_path="artifact.md",
+        report_path="report.md",
         source_path="source.md",
         cited_ranges=[{"start_line": 1, "end_line": 3}],
     )

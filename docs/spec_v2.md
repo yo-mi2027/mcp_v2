@@ -5,7 +5,7 @@
 本ファイルは v2 の共通基盤のみを定義する。領域別の詳細I/Oは以下へ分離する。
 
 - `spec_manuals.md`: `manual_*` ツール仕様
-- `spec_vault.md`: `vault_*` / `artifact_audit` ツール仕様
+- `spec_vault.md`: `vault_*` / `vault_audit` ツール仕様
 - `spec_bridge.md`: `bridge_*` ツール仕様
 - `spec_tooling.md`: `get_tooling_guide` 仕様
 
@@ -85,7 +85,7 @@
 - 初手で `get_tooling_guide` を呼び、`first_tool` を取得してから実処理に入ってよい
 - manual探索では `manual_find` 内で Stage 0〜3 実行後に Stage 3.5（統合判断）を行い、`next_actions` を確定する
 - vault探索では `vault_find` 内で Stage 0〜1 実行後に Stage 1.5（統合判断）を行い、`next_actions` を確定する
-- vaultの抜け漏れ疑いでは `vault_find -> vault_scan -> vault_coverage -> artifact_audit` を段階実行する
+- vaultの抜け漏れ疑いでは `vault_find -> vault_scan -> vault_coverage -> vault_audit` を段階実行する
   - 初回 `vault_scan` は先頭行から開始
   - 2周目以降は `vault_coverage.uncovered_ranges` 優先
 
@@ -97,7 +97,7 @@
 - `vault_find`
 - `vault_scan`
 - `vault_coverage`
-- `artifact_audit`
+- `vault_audit`
 
 共通Actionオブジェクト:
 

@@ -10,11 +10,11 @@ from typing import Any
 from .errors import ToolError, ensure
 from .normalization import loose_contains, normalize_text, split_terms
 from .path_guard import (
-    is_daily_artifact_under_root,
+    is_daily_path_under_root,
     is_system_path_under_root,
     normalize_relative_path,
     resolve_inside_root,
-    validate_daily_artifact_filename,
+    validate_daily_filename,
 )
 from .state import AppState
 
@@ -213,22 +213,22 @@ def vault_search(
 def _enforce_vault_policy_on_create(vault_root: Path, path: str) -> None:
     if is_system_path_under_root(vault_root, path):
         raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
-    if is_daily_artifact_under_root(vault_root, path):
-        validate_daily_artifact_filename(path)
+    if is_daily_path_under_root(vault_root, path):
+        validate_daily_filename(path)
 
 
 def _enforce_vault_policy_on_write(vault_root: Path, path: str, mode: str) -> None:
     if is_system_path_under_root(vault_root, path):
         raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
-    if is_daily_artifact_under_root(vault_root, path):
-        validate_daily_artifact_filename(path)
+    if is_daily_path_under_root(vault_root, path):
+        validate_daily_filename(path)
         ensure(mode == "append", "forbidden", "daily files allow append only")
 
 
 def _enforce_vault_policy_on_replace(vault_root: Path, path: str) -> None:
     if is_system_path_under_root(vault_root, path):
         raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
-    if is_daily_artifact_under_root(vault_root, path):
+    if is_daily_path_under_root(vault_root, path):
         raise ToolError("forbidden", "replace is forbidden under daily/")
 
 
@@ -453,7 +453,7 @@ def vault_coverage(state: AppState, path: str, cited_ranges: list[dict[str, int]
 
     meets = coverage_ratio >= state.config.coverage_min_ratio
     if meets:
-        next_actions = [{"type": "artifact_audit", "confidence": 0.6, "params": None}]
+        next_actions = [{"type": "vault_audit", "confidence": 0.6, "params": None}]
     else:
         params = {"path": normalized, "cursor": {"start_line": uncovered[0]["start_line"]}} if uncovered else None
         next_actions = [{"type": "vault_scan", "confidence": 0.8, "params": params}]
@@ -469,31 +469,31 @@ def vault_coverage(state: AppState, path: str, cited_ranges: list[dict[str, int]
     }
 
 
-def _extract_cited_ranges_from_artifact(artifact_text: str) -> list[dict[str, int]]:
+def _extract_cited_ranges_from_report(report_text: str) -> list[dict[str, int]]:
     ranges: list[dict[str, int]] = []
-    for m in SOURCE_LINES_RE.finditer(artifact_text):
+    for m in SOURCE_LINES_RE.finditer(report_text):
         ranges.append({"start_line": int(m.group(1)), "end_line": int(m.group(2))})
     return ranges
 
 
-def artifact_audit(
+def vault_audit(
     state: AppState,
-    artifact_path: str,
+    report_path: str,
     source_path: str,
     cited_ranges: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
-    artifact_rel = normalize_relative_path(artifact_path)
+    report_rel = normalize_relative_path(report_path)
     source_rel = normalize_relative_path(source_path)
-    artifact_abs = resolve_inside_root(state.config.vault_root, artifact_rel, must_exist=True)
-    source_abs = resolve_inside_root(state.config.vault_root, source_rel, must_exist=True)
+    report_abs = resolve_inside_root(state.config.vault_root, report_rel, must_exist=True)
+    resolve_inside_root(state.config.vault_root, source_rel, must_exist=True)
 
-    artifact_text = artifact_abs.read_text(encoding="utf-8")
+    report_text = report_abs.read_text(encoding="utf-8")
     if cited_ranges is None:
-        cited_ranges = _extract_cited_ranges_from_artifact(artifact_text)
+        cited_ranges = _extract_cited_ranges_from_report(report_text)
     coverage = vault_coverage(state, source_rel, cited_ranges)
     coverage_ratio = coverage["coverage_ratio"] if cited_ranges else None
 
-    lines = artifact_text.splitlines()
+    lines = report_text.splitlines()
     rootless_nodes = sum(1 for line in lines if ("rootless_node" in line or "根拠なし要素" in line))
     orphan_branches = sum(1 for line in lines if ("orphan_branch" in line or "孤立分岐" in line))
     one_way_refs = sum(1 for line in lines if ("one_way_ref" in line or "片方向参照" in line))
@@ -524,7 +524,7 @@ def artifact_audit(
         next_actions = [{"type": "stop", "confidence": 0.9, "params": None}]
 
     return {
-        "artifact_path": artifact_rel,
+        "report_path": report_rel,
         "source_path": source_rel,
         "rootless_nodes": rootless_nodes,
         "orphan_branches": orphan_branches,

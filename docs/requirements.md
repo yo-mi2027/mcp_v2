@@ -92,7 +92,7 @@
 
 - vault内の成果物を探索するため `vault_find` を用意する。
 - Stage 0〜1（正規化一致 / loose一致）を実行し、続いて Stage 1.5（統合判断）で候補統合・偏り/不足判定を行う。
-- `next_actions` は Stage 1.5 の統合判断結果を起点に返す（`type` は次に呼ぶツール名を返し、例: `vault_scan` / `vault_find` / `vault_coverage` / `artifact_audit` / `stop`）。
+- `next_actions` は Stage 1.5 の統合判断結果を起点に返す（`type` は次に呼ぶツール名を返し、例: `vault_scan` / `vault_find` / `vault_coverage` / `vault_audit` / `stop`）。
 - 探索予算の既定は `budget.time_ms=60000`（1分）、`budget.max_candidates=200` とする。
 - 運用上、日次追記ログ（例: `daily/`）を探索から除外したい場合は、`scope.relative_dir` / `glob` で対象を限定する。
 
@@ -101,7 +101,7 @@
 - 「抜け漏れ疑い」に対しては、検索語依存を避けるため `vault_scan` による行レンジ走査を提供する。
 - `vault_scan` はセクション有無に依存せず、任意のテキストファイルを `start_line/end_line` 単位で逐次取得できること。
 - 入力は `path`, `cursor`, `chunk_lines` を受け取り、出力は `applied_range`, `next_cursor`, `eof`, `truncated_reason` を返す。
-- `vault_find` / `vault_scan` / `vault_coverage` / `artifact_audit` は、次ステップを示す `next_actions` を必須で返す（提案なしは空配列）。
+- `vault_find` / `vault_scan` / `vault_coverage` / `vault_audit` は、次ステップを示す `next_actions` を必須で返す（提案なしは空配列）。
 - 既定は「未カバー領域（後述 `vault_coverage`）」を優先して走査し、必要時のみ全行走査へ昇格する。
 - 初回走査（未カバー情報が未作成）は先頭行から開始し、2周目以降は `uncovered_ranges` を優先対象にする。
 - 走査停止は固定回数ではなく、`coverage_ratio` と `marginal_gain`（追加根拠数/追加トークン）で判定する。
@@ -110,8 +110,8 @@
 
 - 成果物（例: フローチャート）の各要素に `source_lines`（出典行範囲）を必須化できる監査ツールを提供する。
 - `vault_coverage` は「参照済み行範囲」と「未参照行範囲（uncovered_ranges）」を返し、`coverage_ratio` を算出する。
-- `artifact_audit` は最低限、`根拠なし要素` / `孤立分岐` / `片方向参照` を検出して返す。
-- `coverage_ratio` が閾値未満、または `artifact_audit` に重大項目がある場合は `vault_scan` の全行走査を推奨する。
+- `vault_audit` は最低限、`根拠なし要素` / `孤立分岐` / `片方向参照` を検出して返す。
+- `coverage_ratio` が閾値未満、または `vault_audit` に重大項目がある場合は `vault_scan` の全行走査を推奨する。
 
 ### 6.2 転送量削減（トークン消費抑制）
 
@@ -173,7 +173,7 @@
 
 ## 8. ツール設計（案）
 
-※ツール名は衝突回避/誤用防止のため “manual_” “vault_” “bridge_” prefix を付ける（例外: `artifact_audit`, `get_tooling_guide` は prefix なしを許可）。
+※ツール名は衝突回避/誤用防止のため “manual_” “vault_” “bridge_” prefix を付ける（`get_tooling_guide` のみ例外）。
 ※同名ツールの多重定義はしない（例: `search_text` を manual/vault で共用しない）。
 ※命名は「動詞+目的語」を基本にする（例: `manual_find`, `vault_read`）。
 
@@ -191,7 +191,7 @@
   - `vault_find`
   - `vault_scan`（行レンジ単位の逐次走査）
   - `vault_coverage`（参照済み/未参照の行レンジ監査）
-  - `artifact_audit`（成果物の根拠・整合監査）
+  - `vault_audit`（成果物の根拠・整合監査）
   - `vault_create`
   - `vault_write`
   - `vault_replace`

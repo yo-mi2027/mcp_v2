@@ -15,7 +15,7 @@
 - `docs/requirements.md`: 要件定義（目的、スコープ、機能/非機能、評価指標）
 - `docs/spec_v2.md`: 共通基盤仕様（Config、安全要件、共通ログ/出力、`next_actions`/`ref` モデル）
 - `docs/spec_manuals.md`: `manual_*` 仕様（探索Stage、I/Oスキーマ）
-- `docs/spec_vault.md`: `vault_*` / `artifact_audit` 仕様（行レンジ走査、カバレッジ監査、I/Oスキーマ）
+- `docs/spec_vault.md`: `vault_*` / `vault_audit` 仕様（行レンジ走査、カバレッジ監査、I/Oスキーマ）
 - `docs/spec_bridge.md`: `bridge_*` 仕様（manual->vaultコピー、I/Oスキーマ）
 - `docs/spec_tooling.md`: `get_tooling_guide` 仕様（固定カタログと `first_tool`）
 - `docs/rag_design_v2.md`: RAG設計（探索ワークフロー、検索実装仕様、見落とし検知）

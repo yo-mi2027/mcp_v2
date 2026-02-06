@@ -65,12 +65,12 @@ def is_system_path(relative: str) -> bool:
     return lower == ".system" or lower.startswith(".system/")
 
 
-def is_daily_artifact(relative: str) -> bool:
+def is_daily_path(relative: str) -> bool:
     normalized = normalize_relative_path(relative)
     return normalized.casefold().startswith("daily/")
 
 
-def is_daily_artifact_under_root(vault_root: Path, relative: str) -> bool:
+def is_daily_path_under_root(vault_root: Path, relative: str) -> bool:
     normalized = normalize_relative_path(relative)
     daily_root = (vault_root / "daily").resolve()
     target = resolve_inside_root(vault_root, normalized, must_exist=False)
@@ -88,7 +88,7 @@ def is_system_path_under_root(vault_root: Path, relative: str) -> bool:
     return p == s or p.startswith(s + "/")
 
 
-def validate_daily_artifact_filename(relative: str) -> None:
+def validate_daily_filename(relative: str) -> None:
     normalized = normalize_relative_path(relative)
     ensure(
         bool(DAILY_FILE_RE.match(normalized)),

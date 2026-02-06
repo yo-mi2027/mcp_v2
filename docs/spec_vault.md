@@ -2,7 +2,7 @@
 
 ## 1. スコープ
 
-本ファイルは `vault_*` および `artifact_audit` の仕様を定義する。共通事項は `spec_v2.md` を参照。
+本ファイルは `vault_*` および `vault_audit` の仕様を定義する。共通事項は `spec_v2.md` を参照。
 
 ## 2. Tool Catalog
 
@@ -11,7 +11,7 @@
 - `vault_find({ query, scope?, budget? })`
 - `vault_scan({ path, cursor?, chunk_lines?, limits? })`
 - `vault_coverage({ path, cited_ranges[] })`
-- `artifact_audit({ artifact_path, source_path, cited_ranges[]? })`
+- `vault_audit({ report_path, source_path, cited_ranges[]? })`
 - `vault_create({ path, content })`
 - `vault_write({ path, content, mode })`
 - `vault_replace({ path, find, replace, max_replacements? })`
@@ -19,7 +19,7 @@
 
 注記:
 
-- `artifact_audit` は `manual_` / `vault_` / `bridge_` の命名規約に対する例外として、cross-domain 監査ツール名を採用する。
+- `vault_audit` は `vault_` プレフィックスに統一した監査ツール名を採用する。
 
 ## 3. Vault探索と監査フロー
 
@@ -28,7 +28,7 @@
 1. `vault_find`
 2. `vault_scan`
 3. `vault_coverage`
-4. `artifact_audit`
+4. `vault_audit`
 
 ルール:
 
@@ -151,7 +151,7 @@
   },
   "next_actions": [
     {
-      "type": "vault_read|vault_search|vault_scan|vault_coverage|artifact_audit|vault_find|stop",
+      "type": "vault_read|vault_search|vault_scan|vault_coverage|vault_audit|vault_find|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -206,7 +206,7 @@
   "truncated_reason": "max_chars|chunk_end|hard_limit|none",
   "next_actions": [
     {
-      "type": "vault_scan|vault_coverage|artifact_audit|stop",
+      "type": "vault_scan|vault_coverage|vault_audit|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -256,7 +256,7 @@
   "meets_min_coverage": "boolean",
   "next_actions": [
     {
-      "type": "vault_scan|artifact_audit|stop",
+      "type": "vault_scan|vault_audit|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -268,11 +268,11 @@
 
 - `meets_min_coverage = coverage_ratio >= COVERAGE_MIN_RATIO`
 
-### `artifact_audit` Input
+### `vault_audit` Input
 
 ```json
 {
-  "artifact_path": "string (required)",
+  "report_path": "string (required)",
   "source_path": "string (required)",
   "cited_ranges": "array<{start_line:number,end_line:number}> | null"
 }
@@ -284,11 +284,11 @@
 - 検出: `rootless_nodes`, `orphan_branches`, `one_way_refs`
 - 用語マッピング: `rootless_node=根拠なし要素`, `orphan_branch=孤立分岐`, `one_way_ref=片方向参照`
 
-### `artifact_audit` Output
+### `vault_audit` Output
 
 ```json
 {
-  "artifact_path": "string",
+  "report_path": "string",
   "source_path": "string",
   "rootless_nodes": "number",
   "orphan_branches": "number",
@@ -299,7 +299,7 @@
   "needs_forced_full_scan": "boolean",
   "next_actions": [
     {
-      "type": "vault_scan|vault_coverage|artifact_audit|stop",
+      "type": "vault_scan|vault_coverage|vault_audit|stop",
       "confidence": "number (0.0..1.0) | null",
       "params": "object | null"
     }
@@ -445,4 +445,4 @@
 - `vault_find`: `trace_id`, `candidates`, `integrated_candidates`, `file_bias_ratio`, `gap_ranges_count`, `sufficiency_score`, `integration_status`, `next_actions`
 - `vault_scan`: `path`, `applied_range`, `eof`, `truncated_reason`
 - `vault_coverage`: `path`, `coverage_ratio`, `covered_ranges`, `uncovered_ranges`
-- `artifact_audit`: `artifact_path`, `source_path`, `rootless_nodes`, `orphan_branches`, `one_way_refs`
+- `vault_audit`: `report_path`, `source_path`, `rootless_nodes`, `orphan_branches`, `one_way_refs`

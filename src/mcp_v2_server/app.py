@@ -17,7 +17,7 @@ from .tools_manual import manual_read as manual_read_impl
 from .tools_manual import manual_toc as manual_toc_impl
 from .tools_tooling import get_tooling_guide as get_tooling_guide_impl
 from .tools_vault import (
-    artifact_audit as artifact_audit_impl,
+    vault_audit as vault_audit_impl,
     vault_coverage as vault_coverage_impl,
     vault_create as vault_create_impl,
     vault_find as vault_find_impl,
@@ -87,8 +87,8 @@ def _execute(state: AppState, tool: str, fn: Callable[..., dict[str, Any]], *arg
                 fields["coverage_ratio"] = out.get("coverage_ratio")
                 fields["covered_ranges"] = out.get("covered_ranges")
                 fields["uncovered_ranges"] = out.get("uncovered_ranges")
-            elif tool == "artifact_audit":
-                for key in ("artifact_path", "source_path", "rootless_nodes", "orphan_branches", "one_way_refs"):
+            elif tool == "vault_audit":
+                for key in ("report_path", "source_path", "rootless_nodes", "orphan_branches", "one_way_refs"):
                     if key in out:
                         fields[key] = out[key]
             elif tool in {"vault_create", "vault_write"}:
@@ -227,17 +227,17 @@ def create_app(state: AppState | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def artifact_audit(
-        artifact_path: str,
+    def vault_audit(
+        report_path: str,
         source_path: str,
         cited_ranges: list[dict[str, int]] | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
-            "artifact_audit",
-            lambda: artifact_audit_impl(
+            "vault_audit",
+            lambda: vault_audit_impl(
                 app_state,
-                artifact_path=artifact_path,
+                report_path=report_path,
                 source_path=source_path,
                 cited_ranges=cited_ranges,
             ),

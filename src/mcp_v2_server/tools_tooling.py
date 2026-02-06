@@ -109,11 +109,11 @@ def get_tooling_guide(intent: str | None = None, target: str | None = None) -> d
             ],
         },
         {
-            "tool_name": "artifact_audit",
+            "tool_name": "vault_audit",
             "when_to_use": "成果物と根拠の整合監査",
-            "required_inputs": ["artifact_path", "source_path"],
+            "required_inputs": ["report_path", "source_path"],
             "safe_defaults": {"cited_ranges": None},
-            "common_errors": [{"code": "not_found", "fix": "artifact/source pathを確認する"}],
+            "common_errors": [{"code": "not_found", "fix": "report/source pathを確認する"}],
         },
         {
             "tool_name": "vault_create",

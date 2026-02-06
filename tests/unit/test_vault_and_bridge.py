@@ -8,7 +8,7 @@ from mcp_v2_server.app import _execute
 from mcp_v2_server.errors import ToolError
 from mcp_v2_server.tools_bridge import bridge_copy_file, bridge_copy_section
 from mcp_v2_server.tools_vault import (
-    artifact_audit,
+    vault_audit,
     vault_coverage,
     vault_create,
     vault_find,
@@ -81,8 +81,8 @@ def test_vault_coverage_normalizes_out_of_bound_and_adjacent_ranges(state) -> No
     assert out["coverage_ratio"] == 1.0
 
 
-def test_artifact_audit_detects_findings(state) -> None:
-    out = artifact_audit(state, artifact_path="artifact.md", source_path="source.md")
+def test_vault_audit_detects_findings(state) -> None:
+    out = vault_audit(state, report_path="report.md", source_path="source.md")
     assert out["rootless_nodes"] >= 1
     assert out["needs_forced_full_scan"] is True
 

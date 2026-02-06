@@ -30,7 +30,7 @@ def state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppState:
 
     _write(vault / "source.md", "line1\nline2\nline3\nline4\nline5\n")
     _write(vault / "notes.md", "対象外 条件\n")
-    _write(vault / "artifact.md", "node A\nsource_lines: 1-2\n根拠なし要素\n")
+    _write(vault / "report.md", "node A\nsource_lines: 1-2\n根拠なし要素\n")
 
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("MANUALS_ROOT", str(manuals))
