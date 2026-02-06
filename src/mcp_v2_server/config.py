@@ -55,14 +55,12 @@ class Config:
     hard_max_chars: int
     default_max_stage: int
     hard_max_stage: int
-    artifacts_dir: str
 
     @classmethod
     def from_env(cls) -> "Config":
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", ".")).expanduser().resolve()
         manuals_root = Path(os.getenv("MANUALS_ROOT", str(workspace_root / "manuals"))).expanduser().resolve()
         vault_root = Path(os.getenv("VAULT_ROOT", str(workspace_root / "vault"))).expanduser().resolve()
-        artifacts_dir = "artifacts"
         default_manual_id = os.getenv("DEFAULT_MANUAL_ID")
 
         return cls(
@@ -89,5 +87,4 @@ class Config:
             hard_max_chars=_env_int("HARD_MAX_CHARS", 20000),
             default_max_stage=_env_int("DEFAULT_MAX_STAGE", 4),
             hard_max_stage=_env_int("HARD_MAX_STAGE", 4),
-            artifacts_dir=artifacts_dir,
         )

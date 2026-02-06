@@ -81,6 +81,11 @@ def test_manual_find_stage3_still_returns_loose_signal(state) -> None:
 
 def test_manual_find_only_unscanned_restricts_initial_scope(state) -> None:
     initial = manual_find(state, query="対象外", manual_id="m1", budget={"max_candidates": 1})
+    initial_unscanned = manual_hits(state, trace_id=initial["trace_id"], kind="unscanned")
+    unscanned_keys = {
+        f'{item["manual_id"]}:{item["path"]}'
+        for item in initial_unscanned["items"]
+    }
     followup = manual_find(
         state,
         query="対象外",
@@ -88,9 +93,11 @@ def test_manual_find_only_unscanned_restricts_initial_scope(state) -> None:
     )
     hits = manual_hits(state, trace_id=followup["trace_id"], kind="candidates")
     assert hits["total"] >= 1
-    paths = {item["ref"]["path"] for item in hits["items"]}
-    assert "policy.json" in paths
-    assert "rules.md" not in paths
+    followup_keys = {
+        f'{item["ref"]["manual_id"]}:{item["ref"]["path"]}'
+        for item in hits["items"]
+    }
+    assert followup_keys.issubset(unscanned_keys)
     assert "prioritized_unscanned_sections" in followup["summary"]["escalation_reasons"]
 
 
@@ -117,10 +124,12 @@ def test_manual_hits_not_found_after_ttl(state) -> None:
     assert e.value.code == "not_found"
 
 
-def test_config_artifacts_dir_is_fixed(monkeypatch) -> None:
-    monkeypatch.setenv("ARTIFACTS_DIR", "custom_artifacts")
+def test_config_default_adaptive_stats_path_under_system(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("VAULT_ROOT", raising=False)
+    monkeypatch.delenv("ADAPTIVE_STATS_PATH", raising=False)
     cfg = Config.from_env()
-    assert cfg.artifacts_dir == "artifacts"
+    assert cfg.adaptive_stats_path == (cfg.vault_root / ".system" / "adaptive_stats.jsonl")
 
 
 def test_adaptive_thresholds_rollback_on_recall_drop(tmp_path) -> None:

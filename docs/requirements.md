@@ -17,15 +17,15 @@
 - ユーザー向け出力は“参照IDの羅列”ではなく、指標サマリと最小限の診断情報中心にする（参照はツール間連携の内部情報として扱う）。本文や抜粋は必要時のみ段階的に取得する。
 - トークン消費量を抑えるため、Exploreの返却は最小限にする。
   - MVPではExploreのサーバ側レポート出力は行わない（チャット返却は `trace_id` / 指標サマリ / `next_actions`（必須、空配列可））
-- ユーザーが「整理して説明して」「フローチャートを作って」「JSONスキーマを出して」等の成果物を求める場合は、成果物を `VAULT_ROOT/artifacts/` 配下に保存し、チャットには要約＋保存先のみ返す
+- ユーザーが「整理して説明して」「フローチャートを作って」「JSONスキーマを出して」等の成果物を求める場合は、成果物を `VAULT_ROOT` 配下の任意プロジェクトフォルダに保存し、チャットには要約＋保存先のみ返す
   - MVPでは成果物の保存/更新は `vault_create` / `vault_write` / `vault_replace` 等の `vault_*` ツールで行う
   - `.md` / `.json` を許容する
   - 「成果物」以外で、単なる疑問点解消のための詳細説明を残す場合も `vault_*` を使う
-  - 日次運用では `VAULT_ROOT/artifacts/daily/YYYY-MM-DD.md` を既定保存先とし、当日ファイルが無ければ `vault_create` で新規作成、あれば `vault_write(mode="append")` で追記する
-  - 日次運用の保存は append-only とし、`artifacts/daily/` 配下では「新規作成は `vault_create` のみ」「更新は `vault_write(mode="append")` のみ」を許可する（`overwrite` / `vault_replace` は禁止）
-  - `artifacts/daily/` 判定は文字列比較ではなく、`path` 正規化（区切り統一、`.` 除去、`..` 禁止、絶対パス拒否）後に `VAULT_ROOT` 結合 -> 実体パス解決（判定用途のみ。アクセス時のsymlink追跡を許可する意味ではない） -> `daily_root` 配下判定で行う
+  - 日次運用では `VAULT_ROOT/daily/YYYY-MM-DD.md` を既定保存先とし、当日ファイルが無ければ `vault_create` で新規作成、あれば `vault_write(mode="append")` で追記する
+  - 日次運用の保存は append-only とし、`daily/` 配下では「新規作成は `vault_create` のみ」「更新は `vault_write(mode="append")` のみ」を許可する（`overwrite` / `vault_replace` は禁止）
+  - `daily/` 判定は文字列比較ではなく、`path` 正規化（区切り統一、`.` 除去、`..` 禁止、絶対パス拒否）後に `VAULT_ROOT` 結合 -> 実体パス解決（判定用途のみ。アクセス時のsymlink追跡を許可する意味ではない） -> `daily_root` 配下判定で行う
   - 大小文字差や相対パス揺れによる迂回を防ぐため、境界比較は casefold 後の同一規則で評価する
-  - 日次ログの許可ファイル名は `artifacts/daily/YYYY-MM-DD.md` に固定する
+  - 日次ログの許可ファイル名は `daily/YYYY-MM-DD.md` に固定する
   - 日次ログはノイズ抑制のため、`vault_find` の通常探索対象から外せるように `scope.relative_dir` / `glob` を使って探索範囲を制御する
 
 ## 3. 非ゴール（当面やらない）
@@ -50,7 +50,7 @@
 - Vault:
   - ルートディレクトリは設定で指定（既定: `WORKSPACE_ROOT/vault`）
   - ディレクトリは manual別に分割しない（出し入れしやすさを優先し、共通の用途別構成にする）
-  - 推奨用途別構成: `artifacts/`, `drafts/`, `notes/`, `.system/`
+  - 推奨用途別構成: `daily/`, `.system/`, および任意のプロジェクトフォルダ
   - manualとの紐付けが必要な場合は、ディレクトリ分割ではなくファイル内メタデータ（例: `source_manual_ids`）で管理する
 
 ## 5. 主要ユースケース（MVP）
@@ -94,7 +94,7 @@
 - Stage 0〜1（正規化一致 / loose一致）を実行し、続いて Stage 1.5（統合判断）で候補統合・偏り/不足判定を行う。
 - `next_actions` は Stage 1.5 の統合判断結果を起点に返す（`type` は次に呼ぶツール名を返し、例: `vault_scan` / `vault_find` / `vault_coverage` / `artifact_audit` / `stop`）。
 - 探索予算の既定は `budget.time_ms=60000`（1分）、`budget.max_candidates=200` とする。
-- 運用上、日次追記ログ（例: `artifacts/daily/`）を探索から除外したい場合は、`scope.relative_dir` / `glob` で対象を限定する。
+- 運用上、日次追記ログ（例: `daily/`）を探索から除外したい場合は、`scope.relative_dir` / `glob` で対象を限定する。
 
 ### 6.1.2 Vault網羅走査（行レンジベース）
 
@@ -135,7 +135,7 @@
 - 一覧、読み取り（範囲指定）、書き込み、置換、検索。
 - 書き込みのモード（上書き/追記）を明示する。
 - 新規作成は専用ツール（`vault_create`）で行い、上書き/追記は既存ファイルに対してのみ許可する。
-- 成果物保存先（`VAULT_ROOT/artifacts/`）では `.md` / `.json` のみ許可する。
+- 成果物保存先は `VAULT_ROOT` 配下の任意プロジェクトフォルダとし、`.system/` を除いて拡張子制約は設けない（MVP）。
 
 ### 6.5 ツール理解ガイド（初期ステップ）
 
@@ -157,7 +157,7 @@
   - `MANUALS_ROOT` / `VAULT_ROOT` 外へのアクセス禁止
   - パス正規化（`..`、絶対パス拒否）
   - 書き込み対象拡張子は原則制限しない（MVP）
-  - ただし `VAULT_ROOT/artifacts/` 配下は `.md` / `.json` のみ許可する
+  - ただし `.system/` 配下は予約領域としてユーザー操作を禁止し、`daily/` 配下は append-only とする
 - エラーハンドリング:
   - ツールごとのエラーコード/メッセージ規約
   - 失敗時に“何が足りないか”が分かる情報を返す（パス不正、権限、該当なし等）

@@ -11,9 +11,9 @@ from .errors import ToolError, ensure
 from .normalization import loose_contains, normalize_text, split_terms
 from .path_guard import (
     is_daily_artifact_under_root,
+    is_system_path_under_root,
     normalize_relative_path,
     resolve_inside_root,
-    validate_artifacts_extension,
     validate_daily_artifact_filename,
 )
 from .state import AppState
@@ -210,22 +210,31 @@ def vault_search(
     return {"results": results}
 
 
-def _enforce_artifact_policy_on_create(vault_root: Path, path: str) -> None:
-    validate_artifacts_extension(path)
+def _enforce_vault_policy_on_create(vault_root: Path, path: str) -> None:
+    if is_system_path_under_root(vault_root, path):
+        raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
     if is_daily_artifact_under_root(vault_root, path):
         validate_daily_artifact_filename(path)
 
 
-def _enforce_artifact_policy_on_write(vault_root: Path, path: str, mode: str) -> None:
-    validate_artifacts_extension(path)
+def _enforce_vault_policy_on_write(vault_root: Path, path: str, mode: str) -> None:
+    if is_system_path_under_root(vault_root, path):
+        raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
     if is_daily_artifact_under_root(vault_root, path):
         validate_daily_artifact_filename(path)
-        ensure(mode == "append", "forbidden", "daily artifacts allow append only")
+        ensure(mode == "append", "forbidden", "daily files allow append only")
+
+
+def _enforce_vault_policy_on_replace(vault_root: Path, path: str) -> None:
+    if is_system_path_under_root(vault_root, path):
+        raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
+    if is_daily_artifact_under_root(vault_root, path):
+        raise ToolError("forbidden", "replace is forbidden under daily/")
 
 
 def vault_create(state: AppState, path: str, content: str) -> dict[str, Any]:
     normalized = normalize_relative_path(path)
-    _enforce_artifact_policy_on_create(state.config.vault_root, normalized)
+    _enforce_vault_policy_on_create(state.config.vault_root, normalized)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=False)
     ensure(not target.exists(), "conflict", "file already exists", {"path": normalized})
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -236,7 +245,7 @@ def vault_create(state: AppState, path: str, content: str) -> dict[str, Any]:
 def vault_write(state: AppState, path: str, content: str, mode: str) -> dict[str, Any]:
     ensure(mode in {"overwrite", "append"}, "invalid_parameter", "mode must be overwrite or append")
     normalized = normalize_relative_path(path)
-    _enforce_artifact_policy_on_write(state.config.vault_root, normalized, mode)
+    _enforce_vault_policy_on_write(state.config.vault_root, normalized, mode)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=False)
     ensure(target.exists(), "conflict", "vault_write requires existing file", {"path": normalized})
     ensure(target.is_file(), "not_found", "target is not a file", {"path": normalized})
@@ -248,9 +257,7 @@ def vault_write(state: AppState, path: str, content: str, mode: str) -> dict[str
 
 def vault_replace(state: AppState, path: str, find: str, replace: str, max_replacements: int | None = None) -> dict[str, Any]:
     normalized = normalize_relative_path(path)
-    validate_artifacts_extension(normalized)
-    if is_daily_artifact_under_root(state.config.vault_root, normalized):
-        raise ToolError("forbidden", "replace is forbidden under artifacts/daily")
+    _enforce_vault_policy_on_replace(state.config.vault_root, normalized)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     ensure(target.is_file(), "not_found", "target is not a file", {"path": normalized})
     data = target.read_text(encoding="utf-8")

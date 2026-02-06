@@ -87,13 +87,13 @@ def test_artifact_audit_detects_findings(state) -> None:
     assert out["needs_forced_full_scan"] is True
 
 
-def test_daily_artifact_forbids_overwrite_and_replace(state) -> None:
-    vault_create(state, path="artifacts/daily/2026-02-06.md", content="first\n")
+def test_daily_file_forbids_overwrite_and_replace(state) -> None:
+    vault_create(state, path="daily/2026-02-06.md", content="first\n")
     with pytest.raises(ToolError) as e1:
-        vault_write(state, path="artifacts/daily/2026-02-06.md", content="x", mode="overwrite")
+        vault_write(state, path="daily/2026-02-06.md", content="x", mode="overwrite")
     assert e1.value.code == "forbidden"
     with pytest.raises(ToolError) as e2:
-        vault_replace(state, path="artifacts/daily/2026-02-06.md", find="a", replace="b")
+        vault_replace(state, path="daily/2026-02-06.md", find="a", replace="b")
     assert e2.value.code == "forbidden"
 
 
@@ -103,7 +103,7 @@ def test_bridge_copy_file_md_requires_allow_file_scope(state, monkeypatch) -> No
             state,
             from_path="rules.md",
             manual_id="m1",
-            to_path="artifacts/copied.md",
+            to_path="project-a/copied.md",
             mode="overwrite",
             limits={"allow_file": True},
         )
@@ -115,7 +115,7 @@ def test_bridge_copy_file_md_requires_allow_file_scope(state, monkeypatch) -> No
         state,
         from_path="rules.md",
         manual_id="m1",
-        to_path="artifacts/copied.md",
+        to_path="project-a/copied.md",
         mode="overwrite",
         limits={"allow_file": True},
     )
@@ -127,7 +127,7 @@ def test_bridge_copy_file_json_allows_file_scope_without_allow_file(state) -> No
         state,
         from_path="policy.json",
         manual_id="m1",
-        to_path="artifacts/copied.json",
+        to_path="project-a/copied.json",
         mode="overwrite",
         limits={},
     )
@@ -136,8 +136,23 @@ def test_bridge_copy_file_json_allows_file_scope_without_allow_file(state) -> No
 
 def test_bridge_copy_section_requires_object_ref(state) -> None:
     with pytest.raises(ToolError) as e:
-        bridge_copy_section(state, from_ref=None, to_path="artifacts/copied.md", mode="overwrite")  # type: ignore[arg-type]
+        bridge_copy_section(state, from_ref=None, to_path="project-a/copied.md", mode="overwrite")  # type: ignore[arg-type]
     assert e.value.code == "invalid_parameter"
+
+
+def test_system_path_is_reserved(state) -> None:
+    with pytest.raises(ToolError) as e1:
+        vault_create(state, path=".system/manual_note.md", content="nope")
+    assert e1.value.code == "forbidden"
+
+    (state.config.vault_root / ".system").mkdir(parents=True, exist_ok=True)
+    (state.config.vault_root / ".system" / "existing.md").write_text("x", encoding="utf-8")
+    with pytest.raises(ToolError) as e2:
+        vault_write(state, path=".system/existing.md", content="y", mode="append")
+    assert e2.value.code == "forbidden"
+    with pytest.raises(ToolError) as e3:
+        vault_replace(state, path=".system/existing.md", find="x", replace="y")
+    assert e3.value.code == "forbidden"
 
 
 def test_execute_logs_bridge_extension_fields(state, capsys) -> None:
@@ -145,7 +160,7 @@ def test_execute_logs_bridge_extension_fields(state, capsys) -> None:
         state,
         "bridge_copy_section",
         lambda *, mode: {
-            "written_path": "artifacts/copied.md",
+            "written_path": "project-a/copied.md",
             "written_bytes": 12,
             "written_sections": 1,
             "truncated": False,
@@ -156,7 +171,7 @@ def test_execute_logs_bridge_extension_fields(state, capsys) -> None:
     line = capsys.readouterr().err.strip().splitlines()[-1]
     payload = json.loads(line)
     assert payload["tool"] == "bridge_copy_section"
-    assert payload["written_path"] == "artifacts/copied.md"
+    assert payload["written_path"] == "project-a/copied.md"
     assert payload["mode"] == "append"
     assert payload["written_sections"] == 1
 
@@ -171,7 +186,7 @@ def test_execute_logs_vault_extension_fields(state, capsys) -> None:
     _execute(
         state,
         "vault_write",
-        lambda *, mode: {"written_path": "artifacts/out.md", "written_bytes": 10},
+        lambda *, mode: {"written_path": "project-a/out.md", "written_bytes": 10},
         mode="append",
     )
     _execute(

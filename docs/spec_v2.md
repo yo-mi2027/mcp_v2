@@ -28,6 +28,9 @@
 
 - `manuals/<manual_id>/`
 - `vault/`
+  - `vault/daily/`（日次ログの予約領域）
+  - `vault/.system/`（システム管理の予約領域）
+  - 上記以外は任意プロジェクトフォルダを利用
 
 ### 3.2 共通運用
 
@@ -54,7 +57,6 @@
 - `HARD_MAX_CHARS`（既定: `20000`）
 - `DEFAULT_MAX_STAGE`（既定: `4`）
 - `HARD_MAX_STAGE`（既定: `4`）
-- `ARTIFACTS_DIR`（固定: `artifacts`）
 
 ## 4. 共通安全要件
 
@@ -63,17 +65,18 @@
 - `MANUALS_ROOT` / `VAULT_ROOT` 外へのアクセス禁止
 - アクセス時に symlink は辿らない
 
-`artifacts/daily/` 判定ルール（固定）:
+`daily/` 判定ルール（固定）:
 
 - `path` を正規化（区切り統一、`.` 除去、`..` 禁止、絶対パス拒否）
 - `VAULT_ROOT` と結合した実体パスで境界判定（判定用途のみ）
-- `daily_root = realpath(VAULT_ROOT/artifacts/daily)` 配下判定
+- `daily_root = realpath(VAULT_ROOT/daily)` 配下判定
 - 比較は casefold 後に実施
+- `.system/` 配下は予約領域としてユーザー編集操作を禁止する
 
 ## 5. 共通出力方針
 
 - Explore返却は最小化（`trace_id` + 指標サマリ + `next_actions`）
-- Produceは `VAULT_ROOT/artifacts/` へ保存
+- Produceは `VAULT_ROOT` 配下の任意プロジェクトフォルダへ保存
 - 本文は必要時のみ取得（段階的取得）
 
 ## 6. 共通オーケストレーション

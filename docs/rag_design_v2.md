@@ -262,6 +262,6 @@ MVPではExploreのサーバ側レポート出力は行わない（チャット�
 - ユーザー向け出力（text）は最小化し、`trace_id` / 指標サマリのみ返す。
 - LLMの後続判断のための材料（候補ID、上位N件の短いダイジェスト等）は `structuredContent` にのみ含め、ユーザー表示には出さない。
 - 打ち切りが発生した場合は `cutoff_reason` を summary に含め、それ以外は省略する。
-- 整理済みの説明や図解などの成果物が必要な場合は、`vault_create` / `vault_write` / `vault_replace` 等の `vault_*` ツールで `VAULT_ROOT/artifacts/` 配下に保存/更新し、チャットは要約＋保存先のみとする（Produce）。
+- 整理済みの説明や図解などの成果物が必要な場合は、`vault_create` / `vault_write` / `vault_replace` 等の `vault_*` ツールで `VAULT_ROOT` 配下の任意プロジェクトフォルダに保存/更新し、チャットは要約＋保存先のみとする（Produce）。
 - 「成果物」だけでなく、単なる疑問点解消のための詳細説明をファイルに残したい場合も同様に `vault_*` を使う（Produce）。
 - manual修正が必要な場合は、`bridge_copy_file` に `manual_id + path` を渡して vault に全文転記し、以後の編集は vault 側で行う。

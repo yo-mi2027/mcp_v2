@@ -119,10 +119,10 @@ def get_tooling_guide(intent: str | None = None, target: str | None = None) -> d
             "tool_name": "vault_create",
             "when_to_use": "成果物の新規作成",
             "required_inputs": ["path", "content"],
-            "safe_defaults": {"path": "artifacts/result.md"},
+            "safe_defaults": {"path": "project-a/result.md"},
             "common_errors": [
                 {"code": "conflict", "fix": "既存ファイルならvault_writeを使う"},
-                {"code": "forbidden", "fix": "artifacts配下は.md/.jsonのみを使う"},
+                {"code": "forbidden", "fix": ".system配下は予約領域のため使用しない"},
             ],
         },
         {
@@ -132,7 +132,7 @@ def get_tooling_guide(intent: str | None = None, target: str | None = None) -> d
             "safe_defaults": {"mode": "append"},
             "common_errors": [
                 {"code": "conflict", "fix": "対象ファイルを先に作成する"},
-                {"code": "forbidden", "fix": "daily配下はappendのみ使う"},
+                {"code": "forbidden", "fix": "daily配下はappendのみ、.system配下は書き込み不可"},
             ],
         },
         {
@@ -140,7 +140,7 @@ def get_tooling_guide(intent: str | None = None, target: str | None = None) -> d
             "when_to_use": "既存テキストの置換更新",
             "required_inputs": ["path", "find", "replace"],
             "safe_defaults": {"max_replacements": 1},
-            "common_errors": [{"code": "forbidden", "fix": "daily配下ではreplaceを使わない"}],
+            "common_errors": [{"code": "forbidden", "fix": "daily/.system配下ではreplaceを使わない"}],
         },
         {
             "tool_name": "vault_search",

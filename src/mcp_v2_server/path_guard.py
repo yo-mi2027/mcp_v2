@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 
 from .errors import ToolError, ensure
 
-DAILY_FILE_RE = re.compile(r"^artifacts/daily/\d{4}-\d{2}-\d{2}\.md$", re.IGNORECASE)
+DAILY_FILE_RE = re.compile(r"^daily/\d{4}-\d{2}-\d{2}\.md$", re.IGNORECASE)
 
 
 def normalize_relative_path(path: str) -> str:
@@ -59,30 +59,33 @@ def resolve_inside_root(root: Path, relative: str, *, must_exist: bool = False) 
     return resolved
 
 
-def validate_artifacts_extension(relative: str) -> None:
+def is_system_path(relative: str) -> bool:
     normalized = normalize_relative_path(relative)
     lower = normalized.casefold()
-    if lower.startswith("artifacts/"):
-        ensure(
-            lower.endswith(".md") or lower.endswith(".json"),
-            "forbidden",
-            "artifacts path only allows .md or .json",
-            {"path": normalized},
-        )
+    return lower == ".system" or lower.startswith(".system/")
 
 
 def is_daily_artifact(relative: str) -> bool:
     normalized = normalize_relative_path(relative)
-    return normalized.casefold().startswith("artifacts/daily/")
+    return normalized.casefold().startswith("daily/")
 
 
 def is_daily_artifact_under_root(vault_root: Path, relative: str) -> bool:
     normalized = normalize_relative_path(relative)
-    daily_root = (vault_root / "artifacts" / "daily").resolve()
+    daily_root = (vault_root / "daily").resolve()
     target = resolve_inside_root(vault_root, normalized, must_exist=False)
     p = str(target).casefold()
     d = str(daily_root).casefold()
     return p == d or p.startswith(d + "/")
+
+
+def is_system_path_under_root(vault_root: Path, relative: str) -> bool:
+    normalized = normalize_relative_path(relative)
+    system_root = (vault_root / ".system").resolve()
+    target = resolve_inside_root(vault_root, normalized, must_exist=False)
+    p = str(target).casefold()
+    s = str(system_root).casefold()
+    return p == s or p.startswith(s + "/")
 
 
 def validate_daily_artifact_filename(relative: str) -> None:
@@ -90,6 +93,6 @@ def validate_daily_artifact_filename(relative: str) -> None:
     ensure(
         bool(DAILY_FILE_RE.match(normalized)),
         "forbidden",
-        "daily artifact path must be artifacts/daily/YYYY-MM-DD.md",
+        "daily path must be daily/YYYY-MM-DD.md",
         {"path": normalized},
     )

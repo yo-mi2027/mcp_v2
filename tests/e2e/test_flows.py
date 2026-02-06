@@ -17,7 +17,7 @@ def test_manual_flow_e2e(state) -> None:
     copied = bridge_copy_section(
         state,
         from_ref=top["ref"],
-        to_path="artifacts/result.md",
+        to_path="project-a/result.md",
         mode="overwrite",
     )
     assert copied["written_bytes"] > 0

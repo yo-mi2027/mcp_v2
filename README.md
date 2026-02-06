@@ -6,16 +6,19 @@
 
 - `manuals/<manual_id>/`
 - `vault/`
+  - `vault/daily/`（日次ログ用の予約領域）
+  - `vault/.system/`（システム管理用の予約領域）
+  - 上記以外は任意のプロジェクトフォルダを作成して利用
 
 ## Docs
 
-- `requirements.md`: 要件定義（目的、スコープ、機能/非機能、評価指標）
-- `spec_v2.md`: 共通基盤仕様（Config、安全要件、共通ログ/出力、`next_actions`/`ref` モデル）
-- `spec_manuals.md`: `manual_*` 仕様（探索Stage、I/Oスキーマ）
-- `spec_vault.md`: `vault_*` / `artifact_audit` 仕様（行レンジ走査、カバレッジ監査、I/Oスキーマ）
-- `spec_bridge.md`: `bridge_*` 仕様（manual->vaultコピー、I/Oスキーマ）
-- `spec_tooling.md`: `get_tooling_guide` 仕様（固定カタログと `first_tool`）
-- `rag_design_v2.md`: RAG設計（探索ワークフロー、検索実装仕様、見落とし検知）
+- `docs/requirements.md`: 要件定義（目的、スコープ、機能/非機能、評価指標）
+- `docs/spec_v2.md`: 共通基盤仕様（Config、安全要件、共通ログ/出力、`next_actions`/`ref` モデル）
+- `docs/spec_manuals.md`: `manual_*` 仕様（探索Stage、I/Oスキーマ）
+- `docs/spec_vault.md`: `vault_*` / `artifact_audit` 仕様（行レンジ走査、カバレッジ監査、I/Oスキーマ）
+- `docs/spec_bridge.md`: `bridge_*` 仕様（manual->vaultコピー、I/Oスキーマ）
+- `docs/spec_tooling.md`: `get_tooling_guide` 仕様（固定カタログと `first_tool`）
+- `docs/rag_design_v2.md`: RAG設計（探索ワークフロー、検索実装仕様、見落とし検知）
 
 ## Implementation
 
@@ -90,4 +93,3 @@ PYTHONPATH=src pytest -q
 - `HARD_MAX_CHARS` (default: `20000`)
 - `DEFAULT_MAX_STAGE` (default: `4`)
 - `HARD_MAX_STAGE` (default: `4`)
-- `ARTIFACTS_DIR` (default: `artifacts`)

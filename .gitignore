@@ -1,0 +1,12 @@
+# Local data roots
+manuals/
+vault/
+
+# Python environment/cache
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# OS/editor noise
+.DS_Store

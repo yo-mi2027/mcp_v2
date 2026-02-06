@@ -341,8 +341,8 @@
 
 固定ルール:
 
-- `path` が `artifacts/` 配下の場合、拡張子は `.md` / `.json` のみ許可
-- `path` が `artifacts/daily/` 配下の場合、新規作成は `artifacts/daily/YYYY-MM-DD.md` 形式のみ許可
+- `.system/` 配下は予約領域のため作成禁止
+- `path` が `daily/` 配下の場合、新規作成は `daily/YYYY-MM-DD.md` 形式のみ許可
 
 ### `vault_write` Input
 
@@ -357,10 +357,10 @@
 固定ルール:
 
 - 原則 `mode=overwrite|append` は既存ファイルのみ
-- `path` が `artifacts/` 配下の場合、拡張子は `.md` / `.json` のみ許可
-- `artifacts/daily/` 配下は `append` のみ許可
-- `artifacts/daily/` の初回作成は `vault_create` を使用する
-- `artifacts/daily/YYYY-MM-DD.md` 形式のみ許可
+- `.system/` 配下は予約領域のため更新禁止
+- `daily/` 配下は `append` のみ許可
+- `daily/` の初回作成は `vault_create` を使用する
+- `daily/YYYY-MM-DD.md` 形式のみ許可
 
 ### `vault_write` Output
 
@@ -385,7 +385,7 @@
 固定ルール:
 
 - `max_replacements` 既定: `1`
-- `artifacts/daily/` 配下は置換禁止
+- `.system/` / `daily/` 配下は置換禁止
 
 ### `vault_replace` Output
 
@@ -433,7 +433,7 @@
   - `invalid_parameter`: `chunk_lines` や `limit` が許容範囲外
   - `invalid_path` / `out_of_scope`: パス検証違反
   - `not_found`: 対象ファイル不存在
-  - `forbidden`: `artifacts/` 配下拡張子制約違反、`artifacts/daily/` 更新ポリシー違反
+  - `forbidden`: `.system/` 予約領域への操作、`daily/` 更新ポリシー違反
   - `conflict`: `vault_write` が既存ファイル前提に反するなど前提不一致
 
 ## 6. vaultログ拡張（info）
