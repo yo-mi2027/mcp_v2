@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import time
+from pathlib import PureWindowsPath
 
 import pytest
 
 from mcp_v2_server.adaptive_stats import AdaptiveStatsWriter
 from mcp_v2_server.config import Config
 from mcp_v2_server.errors import ToolError
-from mcp_v2_server.path_guard import normalize_relative_path
-from mcp_v2_server.tools_manual import manual_find, manual_hits, manual_read, manual_toc
+from mcp_v2_server.path_guard import _is_subpath_casefold, normalize_relative_path
+from mcp_v2_server.tools_manual import manual_find, manual_hits, manual_read, manual_scan, manual_toc
 
 
 def test_normalize_relative_path_rejects_absolute() -> None:
@@ -21,6 +22,24 @@ def test_normalize_relative_path_rejects_parent() -> None:
     with pytest.raises(ToolError) as e:
         normalize_relative_path("../x.md")
     assert e.value.code == "invalid_path"
+
+
+def test_normalize_relative_path_rejects_windows_absolute_drive() -> None:
+    with pytest.raises(ToolError) as e:
+        normalize_relative_path(r"C:\abs\path.md")
+    assert e.value.code == "invalid_path"
+
+
+def test_normalize_relative_path_normalizes_windows_separators() -> None:
+    assert normalize_relative_path(r"daily\2026-02-07.md") == "daily/2026-02-07.md"
+
+
+def test_is_subpath_casefold_supports_windows_paths() -> None:
+    root = PureWindowsPath(r"C:\ws\vault\daily")
+    child = PureWindowsPath(r"C:\ws\vault\daily\2026-02-07.md")
+    outside = PureWindowsPath(r"C:\ws\vault\daily2\2026-02-07.md")
+    assert _is_subpath_casefold(child, root) is True
+    assert _is_subpath_casefold(outside, root) is False
 
 
 def test_manual_toc_has_parent_relations(state) -> None:
@@ -51,6 +70,24 @@ def test_manual_read_md_defaults_to_snippet_scope(state) -> None:
     assert "## 例外" in out["text"]
 
 
+def test_manual_read_infers_manual_target_when_missing(state) -> None:
+    out = manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "rules.md", "start_line": 3},
+    )
+    assert out["applied"]["scope"] == "snippet"
+    assert "## 例外" in out["text"]
+
+
+def test_manual_read_rejects_non_manual_target(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(
+            state,
+            ref={"target": "vault", "manual_id": "m1", "path": "rules.md", "start_line": 3},
+        )
+    assert e.value.code == "invalid_parameter"
+
+
 def test_manual_read_rejects_invalid_scope(state) -> None:
     with pytest.raises(ToolError) as e:
         manual_read(
@@ -59,6 +96,38 @@ def test_manual_read_rejects_invalid_scope(state) -> None:
             scope="bad_scope",
         )
     assert e.value.code == "invalid_parameter"
+
+
+def test_manual_scan_chunk_lines_range(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_scan(state, manual_id="m1", path="rules.md", chunk_lines=999)
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_scan_paginates_until_eof(state) -> None:
+    first = manual_scan(state, manual_id="m1", path="rules.md", chunk_lines=2)
+    assert first["applied_range"] == {"start_line": 1, "end_line": 2}
+    assert first["eof"] is False
+    assert first["truncated_reason"] == "chunk_end"
+    assert first["next_cursor"]["start_line"] == 3
+
+    second = manual_scan(
+        state,
+        manual_id="m1",
+        path="rules.md",
+        cursor=first["next_cursor"],
+        chunk_lines=20,
+    )
+    assert second["eof"] is True
+    assert second["truncated_reason"] == "none"
+    assert second["next_cursor"]["start_line"] is None
+
+
+def test_manual_scan_truncates_by_max_chars(state) -> None:
+    out = manual_scan(state, manual_id="m1", path="rules.md", chunk_lines=20, limits={"max_chars": 5})
+    assert out["truncated"] is True
+    assert out["truncated_reason"] == "max_chars"
+    assert len(out["text"]) == 5
 
 
 def test_manual_find_rejects_invalid_max_stage(state) -> None:
@@ -77,6 +146,44 @@ def test_manual_find_stage3_still_returns_loose_signal(state) -> None:
     out = manual_find(state, query="対 象外", manual_id="m1", max_stage=3)
     hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
     assert any("loose" in item["signals"] for item in hits["items"])
+
+
+def test_manual_find_does_not_match_reference_words_only(state) -> None:
+    manual_dir = state.config.manuals_root / "m3"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "ref_only.md").write_text("# 補足\n別表を参照。\n", encoding="utf-8")
+
+    out = manual_find(state, query="無関係語", manual_id="m3", max_stage=3)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+
+    assert out["summary"]["candidates"] == 0
+    assert hits["total"] == 0
+
+
+def test_manual_find_stage3_does_not_expand_exceptions_only_candidates(state) -> None:
+    manual_dir = state.config.manuals_root / "m3"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "exceptions_only.md").write_text("# 補足\nこの場合は対象外です。\n", encoding="utf-8")
+
+    out = manual_find(state, query="無関係語", manual_id="m3", intent="exceptions", max_stage=3)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+
+    assert out["summary"]["candidates"] == 0
+    assert hits["total"] == 0
+    assert out["summary"]["cutoff_reason"] == "stage_cap"
+
+
+def test_manual_find_stage4_expands_exceptions_for_exceptions_intent(state) -> None:
+    manual_dir = state.config.manuals_root / "m3"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "exceptions_only.md").write_text("# 補足\nこの場合は対象外です。\n", encoding="utf-8")
+
+    out = manual_find(state, query="無関係語", manual_id="m3", intent="exceptions", max_stage=4)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+
+    assert out["summary"]["candidates"] >= 1
+    assert any("exceptions" in item["signals"] for item in hits["items"])
+    assert "exceptions_manual_expanded" in out["summary"]["escalation_reasons"]
 
 
 def test_manual_find_only_unscanned_restricts_initial_scope(state) -> None:
@@ -104,6 +211,49 @@ def test_manual_find_only_unscanned_restricts_initial_scope(state) -> None:
 def test_manual_find_summary_has_integrated_candidates(state) -> None:
     out = manual_find(state, query="対象外")
     assert "integrated_candidates" in out["summary"]
+
+
+def test_manual_find_returns_claim_graph(state) -> None:
+    out = manual_find(state, query="対象外", intent="exceptions")
+    assert "claim_graph" in out
+    assert "claims" in out["claim_graph"]
+    assert "evidences" in out["claim_graph"]
+    assert "edges" in out["claim_graph"]
+    assert "facets" in out["claim_graph"]
+    assert "claim_count" in out["summary"]
+
+
+def test_manual_hits_supports_claim_graph_kinds(state) -> None:
+    out = manual_find(state, query="対象外", intent="exceptions")
+    trace_id = out["trace_id"]
+    claims = manual_hits(state, trace_id=trace_id, kind="claims")
+    evidences = manual_hits(state, trace_id=trace_id, kind="evidences")
+    edges = manual_hits(state, trace_id=trace_id, kind="edges")
+    assert claims["total"] >= 1
+    assert evidences["total"] >= 1
+    assert edges["total"] >= 1
+
+
+def test_manual_find_conflict_count_matches_conflict_hits(state) -> None:
+    out = manual_find(state, query="対象外", intent="exceptions", manual_id="m1", max_stage=4)
+    conflicts = manual_hits(state, trace_id=out["trace_id"], kind="conflicts")
+    assert out["summary"]["conflict_count"] == conflicts["total"]
+
+
+def test_manual_find_gap_count_matches_gap_hits(state) -> None:
+    out = manual_find(state, query="対象外の条件と手順を教えて", manual_id="m1", max_stage=4)
+    gaps = manual_hits(state, trace_id=out["trace_id"], kind="gaps")
+    assert out["summary"]["gap_count"] == gaps["total"]
+
+
+def test_manual_find_builds_multiple_claims_from_multi_facet_query(state) -> None:
+    out = manual_find(state, query="対象外の条件と手順を教えて", manual_id="m1", max_stage=4)
+    claims = manual_hits(state, trace_id=out["trace_id"], kind="claims")
+    facets = {item["facet"] for item in claims["items"]}
+    assert claims["total"] >= 2
+    assert "exceptions" in facets
+    assert "procedure" in facets
+    assert out["summary"]["claim_count"] == claims["total"]
 
 
 def test_manual_find_stage_cap_marks_unscanned_sections(state) -> None:

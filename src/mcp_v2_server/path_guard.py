@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 
 from .errors import ToolError, ensure
 
 DAILY_FILE_RE = re.compile(r"^daily/\d{4}-\d{2}-\d{2}\.md$", re.IGNORECASE)
+WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
 
 def normalize_relative_path(path: str) -> str:
     ensure(bool(path and path.strip()), "invalid_path", "path is required")
     canonical = path.replace("\\", "/").strip()
     ensure(not canonical.startswith("/"), "invalid_path", "absolute path is not allowed")
+    ensure(not WINDOWS_DRIVE_RE.match(canonical), "invalid_path", "absolute path is not allowed")
 
     parts = []
     for part in PurePosixPath(canonical).parts:
@@ -23,12 +25,17 @@ def normalize_relative_path(path: str) -> str:
     return "/".join(parts)
 
 
-def _is_subpath_casefold(path: Path, root: Path) -> bool:
-    p = str(path).casefold()
-    r = str(root).casefold()
-    if p == r:
-        return True
-    return p.startswith(r + "/")
+def _comparison_parts(path: PurePath) -> tuple[str, ...]:
+    canonical = str(path).replace("\\", "/").casefold()
+    return tuple(part for part in PurePosixPath(canonical).parts if part not in {"", "."})
+
+
+def _is_subpath_casefold(path: PurePath, root: PurePath) -> bool:
+    p_parts = _comparison_parts(path)
+    r_parts = _comparison_parts(root)
+    if not r_parts or len(p_parts) < len(r_parts):
+        return False
+    return p_parts[: len(r_parts)] == r_parts
 
 
 def _reject_symlink_parts(root: Path, relative: str) -> None:
@@ -74,18 +81,14 @@ def is_daily_path_under_root(vault_root: Path, relative: str) -> bool:
     normalized = normalize_relative_path(relative)
     daily_root = (vault_root / "daily").resolve()
     target = resolve_inside_root(vault_root, normalized, must_exist=False)
-    p = str(target).casefold()
-    d = str(daily_root).casefold()
-    return p == d or p.startswith(d + "/")
+    return _is_subpath_casefold(target, daily_root)
 
 
 def is_system_path_under_root(vault_root: Path, relative: str) -> bool:
     normalized = normalize_relative_path(relative)
     system_root = (vault_root / ".system").resolve()
     target = resolve_inside_root(vault_root, normalized, must_exist=False)
-    p = str(target).casefold()
-    s = str(system_root).casefold()
-    return p == s or p.startswith(s + "/")
+    return _is_subpath_casefold(target, system_root)
 
 
 def validate_daily_filename(relative: str) -> None:

@@ -2,6 +2,11 @@
 
 作成日: 2026-02-03
 
+> 現行注記（2026-02-07）
+> この文書は設計ドラフト（非正本）であり、本文には現行未公開ツールの記述を含む。
+> 現行の正本は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md`。
+> 現行公開ツールは `manual_ls`, `manual_toc`, `manual_find`, `manual_hits`, `manual_read`, `manual_scan`, `vault_create`, `vault_read`, `vault_scan`, `vault_replace` のみ。
+
 ## 1. 背景 / 課題
 
 - 「特定のものに関する情報を網羅的に取得して」という依頼に対して、既存フロー（`search_text` -> `get_section` -> 例外取得）でも抜け漏れが発生する。
@@ -74,9 +79,13 @@
   - Stage 4 発火の初期閾値: 候補0件 / 候補3件未満 / 1ファイル偏重（80%以上、かつ候補総数5件以上） / `intent=exceptions` で例外ヒット0
 - ユーザーのプロンプトから「検索意図」と「検索語（厳密一致候補）」を抽出し、検索計画に反映できる（ツール内のワークフローとして固定化する）。
   - ただし厳密一致のみには依存せず、必ず補助戦略（正規化/ルーズ/見出し補完等）を併用する（抜け漏れ優先）。
-- Stage 0〜3 は 1 ツールに集約し、Stage 2〜3 が失敗しても Stage 0〜1 の結果サマリは返す（部分成功）。
-- Stage 0〜3 の後に Stage 3.5（統合判断）を常時実行し、候補統合・矛盾/欠落判定・十分性評価を行う。
+- Stage 0〜2 は 1 ツールに集約し、Stage 2 が失敗しても Stage 0〜1 の結果サマリは返す（部分成功）。
+  - Stage 2（例外語彙）は注釈シグナル扱いを基本とし、単独一致のみで候補化しない。
+- Stage 0〜2 の後に Stage 3.5（統合判断）を常時実行し、候補統合・矛盾/欠落判定・十分性評価を行う。
+- Stage 3.5 の統合本体は `claim_graph`（`claims/evidences/edges/facets`）とし、`summary` は派生メトリクスとして扱う。
+- Stage 4 では `intent=exceptions` の場合に、例外拡張を「局所（一次候補path）→同一manual→全manual」の順で段階実行できること。
 - `next_actions` は Stage 3.5 の統合判断結果を起点に返す（`type` は次に呼ぶツール名を返し、例: `manual_hits` / `manual_read` / `manual_find` / `stop`）。
+- `manual_hits` は `claims` / `evidences` / `edges` のページング取得を提供し、統合詳細を段階取得できること。
 - 探索予算の既定は `budget.time_ms=60000`（1分）、`budget.max_candidates=200` とする。
 - 打ち切り時は `cutoff_reason` をユーザー向け summary に含め、打ち切りがない場合は省略する。
 - 打ち切りや上限制約で探索しきれなかった対象は `unscanned_sections` として扱い、`reason`（`time_budget` / `candidate_cap` / `stage_cap` / `hard_limit`）付きで識別できるようにする。

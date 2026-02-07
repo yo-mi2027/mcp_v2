@@ -26,23 +26,31 @@ EXCEPTION_WORDS = [
     "不適用",
     "支払われない",
 ]
+NORMALIZED_EXCEPTION_WORDS = [normalize_text(w) for w in EXCEPTION_WORDS]
 
-REFERENCE_WORDS = ["参照", "別表", "準ずる"]
 SYNONYMS = {
     "対象外": ["除外", "不適用"],
     "手順": ["フロー", "手続き"],
 }
 ALLOWED_INTENTS = {"definition", "procedure", "eligibility", "exceptions", "compare", "unknown", None}
+FACET_ORDER = ["definition", "procedure", "eligibility", "exceptions", "compare", "unknown"]
+FACET_HINTS_RAW: dict[str, list[str]] = {
+    "definition": ["定義", "とは", "意味", "概要", "基本"],
+    "procedure": ["手順", "フロー", "手続き", "ステップ", "方法"],
+    "eligibility": ["条件", "要件", "対象", "可否", "適用"],
+    "exceptions": ["例外", "対象外", "除外", "不適用", "ただし", "但し"],
+    "compare": ["比較", "違い", "差分", "優先", "どちら"],
+}
+FACET_HINTS = {
+    key: [normalize_text(word) for word in words]
+    for key, words in FACET_HINTS_RAW.items()
+}
 
 
 def _trim_text(text: str, max_chars: int) -> tuple[str, bool]:
     if len(text) <= max_chars:
         return text, False
     return text[:max_chars], True
-
-
-def manual_list(state: AppState) -> dict[str, Any]:
-    return {"items": [{"manual_id": m} for m in discover_manual_ids(state.config.manuals_root)]}
 
 
 def manual_ls(state: AppState, manual_id: str | None = None) -> dict[str, Any]:
@@ -115,6 +123,11 @@ def _resolve_read_limits(state: AppState, limits: dict[str, Any] | None) -> tupl
     return max_sections, max_chars
 
 
+def _resolve_scan_max_chars(state: AppState, limits: dict[str, Any] | None) -> int:
+    max_chars = int((limits or {}).get("max_chars") or state.config.hard_max_chars)
+    return min(max_chars, state.config.hard_max_chars)
+
+
 def manual_read(
     state: AppState,
     ref: dict[str, Any],
@@ -122,7 +135,12 @@ def manual_read(
     limits: dict[str, Any] | None = None,
     expand: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    ensure(ref.get("target") == "manual", "invalid_parameter", "ref.target must be manual")
+    ref = dict(ref)
+    target = ref.get("target")
+    if target is None:
+        ref["target"] = "manual"
+    else:
+        ensure(target == "manual", "invalid_parameter", "ref.target must be manual")
     manual_id = ref.get("manual_id")
     ensure(bool(manual_id), "invalid_parameter", "ref.manual_id is required")
     ensure(_manual_exists(state.config.manuals_root, manual_id), "not_found", "manual_id not found", {"manual_id": manual_id})
@@ -194,24 +212,62 @@ def manual_read(
     }
 
 
-def manual_excepts(state: AppState, manual_id: str, node_id: str | None = None) -> dict[str, Any]:
+def manual_scan(
+    state: AppState,
+    manual_id: str,
+    path: str,
+    cursor: dict[str, Any] | None = None,
+    chunk_lines: int | None = None,
+    limits: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     ensure(_manual_exists(state.config.manuals_root, manual_id), "not_found", "manual_id not found", {"manual_id": manual_id})
-    items: list[dict[str, Any]] = []
-    files = list_manual_files(state.config.manuals_root, manual_id=manual_id)
-    for row in files:
-        file_path = resolve_inside_root(state.config.manuals_root / manual_id, row.path, must_exist=True)
-        try:
-            text = file_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        lines = text.splitlines()
-        for i, line in enumerate(lines, start=1):
-            if any(word in line for word in EXCEPTION_WORDS):
-                current_node_id = f"{row.path}#L{i}"
-                if node_id and node_id != current_node_id:
-                    continue
-                items.append({"path": row.path, "start_line": i, "snippet": line[:200]})
-    return {"items": items}
+    relative_path = normalize_relative_path(path)
+    full_path = resolve_inside_root(state.config.manuals_root / manual_id, relative_path, must_exist=True)
+    ensure(full_path.exists() and full_path.is_file(), "not_found", "manual file not found", {"path": relative_path})
+
+    text = full_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    total = max(1, len(lines))
+
+    start_line = int((cursor or {}).get("start_line") or 1)
+    applied_chunk = int(chunk_lines or state.config.vault_scan_default_chunk_lines)
+    ensure(
+        1 <= applied_chunk <= state.config.vault_scan_max_chunk_lines,
+        "invalid_parameter",
+        "chunk_lines out of range",
+    )
+    ensure(1 <= start_line <= total, "invalid_parameter", "cursor.start_line out of range")
+
+    end_line = min(total, start_line + applied_chunk - 1)
+    chunk_text = "\n".join(lines[start_line - 1 : end_line])
+    max_chars = _resolve_scan_max_chars(state, limits)
+
+    truncated_reason = "none"
+    if len(chunk_text) > max_chars:
+        chunk_text = chunk_text[:max_chars]
+        truncated_reason = "hard_limit" if max_chars >= state.config.hard_max_chars else "max_chars"
+    elif end_line < total:
+        truncated_reason = "chunk_end"
+    eof = end_line >= total
+
+    return {
+        "manual_id": manual_id,
+        "path": relative_path,
+        "text": chunk_text,
+        "applied_range": {"start_line": start_line, "end_line": end_line},
+        "next_cursor": {"start_line": None if eof else end_line + 1},
+        "eof": eof,
+        "truncated": truncated_reason != "none",
+        "truncated_reason": truncated_reason,
+        "applied": {"chunk_lines": applied_chunk, "max_chars": max_chars},
+        "next_actions": [
+            {
+                "type": "stop" if eof else "manual_scan",
+                "confidence": 0.9 if eof else 0.8,
+                "params": None if eof else {"manual_id": manual_id, "path": relative_path, "cursor": {"start_line": end_line + 1}, "chunk_lines": applied_chunk},
+            }
+        ],
+    }
 
 
 def _candidate_key(item: dict[str, Any]) -> str:
@@ -219,7 +275,172 @@ def _candidate_key(item: dict[str, Any]) -> str:
     return f'{ref["manual_id"]}|{ref["path"]}|{ref.get("start_line") or 1}'
 
 
+def _infer_claim_facets(query: str, intent: str | None, candidates: list[dict[str, Any]]) -> list[str]:
+    query_norm = normalize_text(query)
+    ordered: list[str] = []
+
+    def add(facet: str) -> None:
+        if facet in FACET_ORDER and facet not in ordered:
+            ordered.append(facet)
+
+    if intent and intent != "unknown":
+        add(intent)
+
+    for facet, hints in FACET_HINTS.items():
+        if any(hint in query_norm for hint in hints):
+            add(facet)
+
+    if any("exceptions" in (item.get("signals") or []) for item in candidates):
+        add("exceptions")
+
+    if not ordered:
+        add(intent or "unknown")
+
+    return [facet for facet in FACET_ORDER if facet in ordered] or ["unknown"]
+
+
+def _relation_for_facet(facet: str, candidate: dict[str, Any]) -> tuple[str, float]:
+    signals = set(candidate.get("signals") or [])
+    normalized_title = normalize_text(str((candidate.get("ref") or {}).get("title") or ""))
+    hint_hit = any(word in normalized_title for word in FACET_HINTS.get(facet, []))
+    strong_hit = "normalized" in signals or "loose" in signals
+    heading_hit = "heading" in signals
+
+    if facet == "exceptions":
+        if "exceptions" in signals:
+            return "supports", 0.82
+        if strong_hit and not hint_hit:
+            return "contradicts", 0.70
+        if heading_hit:
+            return "requires_followup", 0.55
+        return "requires_followup", 0.50
+
+    if facet == "eligibility" and "exceptions" in signals and not hint_hit:
+        return "contradicts", 0.68
+    if strong_hit and hint_hit:
+        return "supports", 0.82
+    if strong_hit or hint_hit:
+        return "supports", 0.72
+    if heading_hit:
+        return "requires_followup", 0.55
+    return "requires_followup", 0.50
+
+
+def _build_claim_graph(
+    *,
+    query: str,
+    intent: str | None,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    facets = _infer_claim_facets(query, intent, candidates)
+    claims: list[dict[str, Any]] = []
+    claim_by_facet: dict[str, str] = {}
+    for idx, facet in enumerate(facets, start=1):
+        claim_id = f"claim:{facet}:{idx}"
+        claim_by_facet[facet] = claim_id
+        claims.append(
+            {
+                "claim_id": claim_id,
+                "facet": facet,
+                "text": f"{query} [{facet}]",
+                "status": "unresolved",
+                "confidence": 0.0,
+            }
+        )
+
+    evidences: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    claim_stats: dict[str, dict[str, float]] = {
+        claim["claim_id"]: {"supports": 0, "contradicts": 0, "followups": 0, "support_score_sum": 0.0}
+        for claim in claims
+    }
+
+    for idx, candidate in enumerate(candidates, start=1):
+        ref = candidate["ref"]
+        evidence_id = f"ev:{idx}"
+        score = float(candidate.get("score") or 0.0)
+        signals = sorted(set(candidate.get("signals") or []))
+        digest_input = f'{ref.get("manual_id")}|{ref.get("path")}|{ref.get("start_line") or 1}|{",".join(signals)}|{score}'
+        evidences.append(
+            {
+                "evidence_id": evidence_id,
+                "ref": {
+                    "target": "manual",
+                    "manual_id": ref.get("manual_id"),
+                    "path": ref.get("path"),
+                    "start_line": ref.get("start_line") or 1,
+                },
+                "signals": signals,
+                "score": round(score, 4),
+                "snippet_digest": hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:16],
+            }
+        )
+
+        for facet in facets:
+            claim_id = claim_by_facet[facet]
+            relation, edge_confidence = _relation_for_facet(facet, candidate)
+            edges.append(
+                {
+                    "from_claim_id": claim_id,
+                    "to_evidence_id": evidence_id,
+                    "relation": relation,
+                    "confidence": round(edge_confidence, 2),
+                }
+            )
+            stats = claim_stats[claim_id]
+            if relation == "supports":
+                stats["supports"] += 1
+                stats["support_score_sum"] += ((score + edge_confidence) / 2.0)
+            elif relation == "contradicts":
+                stats["contradicts"] += 1
+            else:
+                stats["followups"] += 1
+
+    for claim in claims:
+        stats = claim_stats[claim["claim_id"]]
+        supports = int(stats["supports"])
+        contradicts = int(stats["contradicts"])
+        followups = int(stats["followups"])
+        if supports > 0 and contradicts > 0:
+            status = "conflicted"
+        elif supports > 0:
+            status = "supported"
+        elif contradicts > 0 or followups > 0:
+            status = "unresolved"
+        else:
+            status = "unresolved"
+        confidence = (stats["support_score_sum"] / supports) if supports > 0 else 0.0
+        claim["status"] = status
+        claim["confidence"] = round(min(1.0, confidence), 4)
+
+    facet_rows: list[dict[str, Any]] = []
+    for facet in facets:
+        rows = [claim for claim in claims if claim["facet"] == facet]
+        supported = sum(1 for claim in rows if claim["status"] == "supported")
+        conflicted = sum(1 for claim in rows if claim["status"] == "conflicted")
+        unresolved = sum(1 for claim in rows if claim["status"] == "unresolved")
+        coverage_status = "covered" if supported > 0 else ("partial" if (conflicted > 0 or unresolved > 0) else "missing")
+        facet_rows.append(
+            {
+                "facet": facet,
+                "claim_count": len(rows),
+                "supported_count": supported,
+                "conflicted_count": conflicted,
+                "unresolved_count": unresolved,
+                "coverage_status": coverage_status,
+            }
+        )
+
+    return {
+        "claims": claims,
+        "evidences": evidences,
+        "edges": edges,
+        "facets": facet_rows,
+    }
+
+
 def _build_summary(
+    claim_graph: dict[str, Any],
     candidates: list[dict[str, Any]],
     scanned_files: int,
     scanned_nodes: int,
@@ -242,17 +463,28 @@ def _build_summary(
     total = len(candidates)
     file_bias = (max(file_counts.values()) / total) if total else 0.0
     exception_hits = signal_counts.get("exceptions", 0)
-    gap_count = 0
+    claims = claim_graph.get("claims", [])
+    edges = claim_graph.get("edges", [])
+    conflicted_claim_count = sum(1 for c in claims if c.get("status") == "conflicted")
+    unresolved_claim_count = sum(1 for c in claims if c.get("status") == "unresolved")
+    supported_claim_count = sum(1 for c in claims if c.get("status") == "supported")
+    contradict_claim_count = len({e.get("from_claim_id") for e in edges if e.get("relation") == "contradicts"})
+    followup_claim_count = len({e.get("from_claim_id") for e in edges if e.get("relation") == "requires_followup"})
+
+    heuristic_gap_count = 0
     if (
         total == 0
         or total < candidate_low_threshold
         or (total >= 5 and file_bias >= file_bias_threshold)
         or (intent == "exceptions" and exception_hits == 0)
     ):
-        gap_count = 1
+        heuristic_gap_count = 1
+
+    gap_count = max(heuristic_gap_count, unresolved_claim_count, followup_claim_count)
+    conflict_count = max(conflicted_claim_count, contradict_claim_count)
 
     sufficiency_score = min(1.0, total / 5.0) * (1.0 - min(file_bias, 1.0) * 0.2)
-    status = "ready" if (sufficiency_score >= 0.6 and gap_count == 0) else "needs_followup"
+    status = "ready" if (sufficiency_score >= 0.6 and gap_count == 0 and conflict_count == 0) else "needs_followup"
     if total == 0:
         status = "blocked"
     summary: dict[str, Any] = {
@@ -270,11 +502,14 @@ def _build_summary(
             "normalized": signal_counts.get("normalized", 0),
             "loose": signal_counts.get("loose", 0),
             "exceptions": signal_counts.get("exceptions", 0),
-            "reference": signal_counts.get("reference", 0),
         },
         "file_bias_ratio": round(file_bias, 4),
-        "conflict_count": 0,
+        "conflict_count": conflict_count,
         "gap_count": gap_count,
+        "claim_count": len(claims),
+        "supported_claim_count": supported_claim_count,
+        "conflicted_claim_count": conflicted_claim_count,
+        "unresolved_claim_count": unresolved_claim_count,
         "sufficiency_score": round(sufficiency_score, 4),
         "integration_status": status,
     }
@@ -283,6 +518,16 @@ def _build_summary(
     if escalation_reasons:
         summary["escalation_reasons"] = escalation_reasons
     return summary
+
+
+def _candidate_metrics(candidates: list[dict[str, Any]]) -> tuple[int, float, int]:
+    total = len(candidates)
+    if total == 0:
+        return 0, 0.0, 0
+    file_counts = Counter(item["path"] for item in candidates)
+    file_bias = max(file_counts.values()) / total
+    exception_hits = sum(1 for item in candidates if "exceptions" in item["signals"])
+    return total, file_bias, exception_hits
 
 
 def _should_expand_scope(
@@ -376,19 +621,22 @@ def _run_find_pass(
                     normalized_title = normalize_text(node.title)
                     normalized_text = normalize_text(node_text)
                     signals: set[str] = set()
+                    strict_signals = 0
 
                     if any(term in normalized_title for term in base_terms):
                         signals.add("heading")
+                        strict_signals += 1
                     if any(term in normalized_text for term in expanded_terms):
                         signals.add("normalized")
+                        strict_signals += 1
                     if any(loose_contains(term, node_text) for term in expanded_terms):
                         signals.add("loose")
-                    if any(word.casefold() in normalized_text for word in [normalize_text(w) for w in EXCEPTION_WORDS]):
+                        strict_signals += 1
+                    if any(word in normalized_text for word in NORMALIZED_EXCEPTION_WORDS):
                         signals.add("exceptions")
-                    if any(word.casefold() in normalized_text for word in [normalize_text(w) for w in REFERENCE_WORDS]):
-                        signals.add("reference")
 
-                    if not signals:
+                    # Stage 2 の exceptions は注釈シグナルとして扱い、候補化トリガーにしない。
+                    if strict_signals == 0:
                         continue
                     ref = {
                         "target": "manual",
@@ -405,7 +653,7 @@ def _run_find_pass(
                         "start_line": node.line_start,
                         "reason": None,
                         "signals": sorted(signals),
-                        "score": round(len(signals) / 5.0, 4),
+                        "score": round(len(signals) / 4.0, 4),
                         "conflict_with": [],
                         "gap_hint": None,
                     }
@@ -417,15 +665,16 @@ def _run_find_pass(
                 scanned_nodes += 1
                 normalized_text = normalize_text(text)
                 signals: set[str] = set()
+                strict_signals = 0
                 if any(term in normalized_text for term in expanded_terms):
                     signals.add("normalized")
+                    strict_signals += 1
                 if any(loose_contains(term, text) for term in expanded_terms):
                     signals.add("loose")
-                if any(normalize_text(w) in normalized_text for w in EXCEPTION_WORDS):
+                    strict_signals += 1
+                if any(word in normalized_text for word in NORMALIZED_EXCEPTION_WORDS):
                     signals.add("exceptions")
-                if any(normalize_text(w) in normalized_text for w in REFERENCE_WORDS):
-                    signals.add("reference")
-                if signals:
+                if strict_signals > 0:
                     item = {
                         "ref": {
                             "target": "manual",
@@ -440,11 +689,109 @@ def _run_find_pass(
                         "start_line": 1,
                         "reason": None,
                         "signals": sorted(signals),
-                        "score": round(len(signals) / 5.0, 4),
+                        "score": round(len(signals) / 4.0, 4),
                         "conflict_with": [],
                         "gap_hint": None,
                     }
                     candidates[_candidate_key(item)] = item
+        if cutoff_reason:
+            break
+
+    ordered = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)
+    return ordered, scanned_files, scanned_nodes, warnings, cutoff_reason, unscanned_sections
+
+
+def _run_exceptions_expand_pass(
+    state: AppState,
+    manual_ids: list[str],
+    budget_time_ms: int,
+    max_candidates: int,
+    existing_count: int,
+    allowed_paths: dict[str, set[str]] | None = None,
+) -> tuple[list[dict[str, Any]], int, int, int, str | None, list[dict[str, Any]]]:
+    start = time.monotonic()
+    candidates: dict[str, dict[str, Any]] = {}
+    warnings = 0
+    scanned_files = 0
+    scanned_nodes = 0
+    cutoff_reason: str | None = None
+    unscanned_sections: list[dict[str, Any]] = []
+
+    for manual_id in manual_ids:
+        files = list_manual_files(state.config.manuals_root, manual_id=manual_id)
+        for row in files:
+            if allowed_paths is not None and row.path not in allowed_paths.get(manual_id, set()):
+                continue
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            if elapsed_ms > budget_time_ms:
+                cutoff_reason = "time_budget"
+                unscanned_sections.append({"manual_id": manual_id, "path": row.path, "reason": "time_budget"})
+                break
+            if existing_count + len(candidates) >= max_candidates:
+                cutoff_reason = "candidate_cap"
+                unscanned_sections.append({"manual_id": manual_id, "path": row.path, "reason": "candidate_cap"})
+                break
+
+            scanned_files += 1
+            full_path = resolve_inside_root(state.config.manuals_root / manual_id, row.path, must_exist=True)
+            try:
+                text = full_path.read_text(encoding="utf-8")
+            except Exception:
+                warnings += 1
+                continue
+
+            if row.file_type == "md":
+                nodes = parse_markdown_toc(row.path, text)
+                lines = text.splitlines()
+                for node in nodes:
+                    scanned_nodes += 1
+                    node_text = "\n".join(lines[node.line_start - 1 : node.line_end])
+                    normalized_text = normalize_text(node_text)
+                    if not any(word in normalized_text for word in NORMALIZED_EXCEPTION_WORDS):
+                        continue
+                    item = {
+                        "ref": {
+                            "target": "manual",
+                            "manual_id": manual_id,
+                            "path": row.path,
+                            "start_line": node.line_start,
+                            "json_path": None,
+                            "title": node.title,
+                            "signals": ["exceptions"],
+                        },
+                        "path": row.path,
+                        "start_line": node.line_start,
+                        "reason": "exceptions_expanded",
+                        "signals": ["exceptions"],
+                        "score": round(1 / 4.0, 4),
+                        "conflict_with": [],
+                        "gap_hint": None,
+                    }
+                    candidates[_candidate_key(item)] = item
+            else:
+                scanned_nodes += 1
+                normalized_text = normalize_text(text)
+                if not any(word in normalized_text for word in NORMALIZED_EXCEPTION_WORDS):
+                    continue
+                item = {
+                    "ref": {
+                        "target": "manual",
+                        "manual_id": manual_id,
+                        "path": row.path,
+                        "start_line": 1,
+                        "json_path": None,
+                        "title": Path(row.path).name,
+                        "signals": ["exceptions"],
+                    },
+                    "path": row.path,
+                    "start_line": 1,
+                    "reason": "exceptions_expanded",
+                    "signals": ["exceptions"],
+                    "score": round(1 / 4.0, 4),
+                    "conflict_with": [],
+                    "gap_hint": None,
+                }
+                candidates[_candidate_key(item)] = item
         if cutoff_reason:
             break
 
@@ -512,10 +859,7 @@ def manual_find(
         allowed_paths=allowed_paths,
     )
 
-    total = len(candidates)
-    file_counts = Counter(item["path"] for item in candidates)
-    file_bias = (max(file_counts.values()) / total) if total else 0.0
-    exception_hits = sum(1 for item in candidates if "exceptions" in item["signals"])
+    total, file_bias, exception_hits = _candidate_metrics(candidates)
     should_expand = _should_expand_scope(
         total=total,
         file_bias=file_bias,
@@ -526,7 +870,104 @@ def manual_find(
     )
 
     scope_expanded = False
+    merged_candidates = {(_candidate_key(item)): item for item in candidates}
     if applied_max_stage == 4:
+        if should_expand and intent == "exceptions":
+            local_paths: dict[str, set[str]] | None = None
+            if manual_id:
+                seed_paths = {
+                    item["path"]
+                    for item in candidates
+                    if item["ref"]["manual_id"] == manual_id
+                }
+                if seed_paths:
+                    local_paths = {manual_id: seed_paths}
+            if local_paths:
+                extra, sf2, sn2, w2, cutoff2, unscanned2 = _run_exceptions_expand_pass(
+                    state=state,
+                    manual_ids=[manual_id] if manual_id else selected_manual_ids,
+                    budget_time_ms=budget_time_ms,
+                    max_candidates=max_candidates,
+                    existing_count=len(merged_candidates),
+                    allowed_paths=local_paths,
+                )
+                for item in extra:
+                    merged_candidates[_candidate_key(item)] = item
+                candidates = sorted(merged_candidates.values(), key=lambda x: x["score"], reverse=True)
+                scanned_files += sf2
+                scanned_nodes += sn2
+                warnings += w2
+                cutoff_reason = cutoff_reason or cutoff2
+                unscanned.extend(unscanned2)
+                scope_expanded = scope_expanded or bool(extra)
+                escalation_reasons.append("exceptions_local_expanded")
+                total, file_bias, exception_hits = _candidate_metrics(candidates)
+                should_expand = _should_expand_scope(
+                    total=total,
+                    file_bias=file_bias,
+                    intent=intent,
+                    exception_hits=exception_hits,
+                    candidate_low_threshold=candidate_low_threshold,
+                    file_bias_threshold=file_bias_threshold,
+                )
+
+            if should_expand and manual_id:
+                extra, sf2, sn2, w2, cutoff2, unscanned2 = _run_exceptions_expand_pass(
+                    state=state,
+                    manual_ids=[manual_id],
+                    budget_time_ms=budget_time_ms,
+                    max_candidates=max_candidates,
+                    existing_count=len(merged_candidates),
+                )
+                for item in extra:
+                    merged_candidates[_candidate_key(item)] = item
+                candidates = sorted(merged_candidates.values(), key=lambda x: x["score"], reverse=True)
+                scanned_files += sf2
+                scanned_nodes += sn2
+                warnings += w2
+                cutoff_reason = cutoff_reason or cutoff2
+                unscanned.extend(unscanned2)
+                scope_expanded = scope_expanded or bool(extra)
+                escalation_reasons.append("exceptions_manual_expanded")
+                total, file_bias, exception_hits = _candidate_metrics(candidates)
+                should_expand = _should_expand_scope(
+                    total=total,
+                    file_bias=file_bias,
+                    intent=intent,
+                    exception_hits=exception_hits,
+                    candidate_low_threshold=candidate_low_threshold,
+                    file_bias_threshold=file_bias_threshold,
+                )
+
+            if should_expand:
+                global_ids = discover_manual_ids(state.config.manuals_root)
+                extra, sf2, sn2, w2, cutoff2, unscanned2 = _run_exceptions_expand_pass(
+                    state=state,
+                    manual_ids=global_ids,
+                    budget_time_ms=budget_time_ms,
+                    max_candidates=max_candidates,
+                    existing_count=len(merged_candidates),
+                )
+                for item in extra:
+                    merged_candidates[_candidate_key(item)] = item
+                candidates = sorted(merged_candidates.values(), key=lambda x: x["score"], reverse=True)
+                scanned_files += sf2
+                scanned_nodes += sn2
+                warnings += w2
+                cutoff_reason = cutoff_reason or cutoff2
+                unscanned.extend(unscanned2)
+                scope_expanded = scope_expanded or bool(extra)
+                escalation_reasons.append("exceptions_global_expanded")
+                total, file_bias, exception_hits = _candidate_metrics(candidates)
+                should_expand = _should_expand_scope(
+                    total=total,
+                    file_bias=file_bias,
+                    intent=intent,
+                    exception_hits=exception_hits,
+                    candidate_low_threshold=candidate_low_threshold,
+                    file_bias_threshold=file_bias_threshold,
+                )
+
         if should_expand and manual_id:
             if total == 0:
                 escalation_reasons.append("zero_candidates")
@@ -548,10 +989,9 @@ def manual_find(
                 prioritize_paths=prioritize_paths,
                 allowed_paths=allowed_paths,
             )
-            merged = {(_candidate_key(item)): item for item in candidates}
             for item in extra:
-                merged[_candidate_key(item)] = item
-            candidates = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+                merged_candidates[_candidate_key(item)] = item
+            candidates = sorted(merged_candidates.values(), key=lambda x: x["score"], reverse=True)
             scanned_files += sf2
             scanned_nodes += sn2
             warnings += w2
@@ -586,7 +1026,13 @@ def manual_find(
         if intent == "exceptions" and exception_hits == 0:
             escalation_reasons.append("exceptions_missing")
 
+    claim_graph = _build_claim_graph(
+        query=query,
+        intent=intent,
+        candidates=candidates,
+    )
     summary = _build_summary(
+        claim_graph=claim_graph,
         candidates=candidates,
         scanned_files=scanned_files,
         scanned_nodes=scanned_nodes,
@@ -601,10 +1047,50 @@ def manual_find(
         escalation_reasons=sorted(set(escalation_reasons)),
     )
     next_actions = _plan_next_actions(summary, query, intent, applied_max_stage)
+    evidences_by_id = {item["evidence_id"]: item for item in claim_graph.get("evidences", [])}
+    conflict_edges = [item for item in claim_graph.get("edges", []) if item.get("relation") == "contradicts"]
+    followup_edges = [item for item in claim_graph.get("edges", []) if item.get("relation") == "requires_followup"]
+    conflict_by_claim: dict[str, dict[str, Any]] = {}
+    for edge in conflict_edges:
+        claim_id = str(edge.get("from_claim_id") or "")
+        if claim_id and claim_id not in conflict_by_claim:
+            conflict_by_claim[claim_id] = edge
+    followup_by_claim: dict[str, dict[str, Any]] = {}
+    for edge in followup_edges:
+        claim_id = str(edge.get("from_claim_id") or "")
+        if claim_id and claim_id not in followup_by_claim:
+            followup_by_claim[claim_id] = edge
+    gap_rows = [
+        {
+            "ref": None,
+            "path": None,
+            "start_line": None,
+            "reason": "gap",
+            "signals": [],
+            "score": None,
+            "conflict_with": [],
+            "gap_hint": f"followup required for claim {claim_id}",
+        }
+        for claim_id in sorted(followup_by_claim.keys())
+    ]
+    while len(gap_rows) < summary["gap_count"]:
+        gap_rows.append(
+            {
+                "ref": None,
+                "path": None,
+                "start_line": None,
+                "reason": "gap",
+                "signals": [],
+                "score": None,
+                "conflict_with": [],
+                "gap_hint": "no candidates matched the current query scope",
+            }
+        )
 
     trace_payload = {
         "query": query,
         "manual_id": manual_id,
+        "claim_graph": claim_graph,
         "summary": summary,
         "candidates": candidates,
         "unscanned_sections": [
@@ -621,23 +1107,20 @@ def manual_find(
             }
             for item in unscanned
         ],
-        "conflicts": [],
-        "gaps": (
-            [
-                {
-                    "ref": None,
-                    "path": None,
-                    "start_line": None,
-                    "reason": "gap",
-                    "signals": [],
-                    "score": None,
-                    "conflict_with": [],
-                    "gap_hint": "no candidates matched the current query scope",
-                }
-            ]
-            if summary["gap_count"] > 0
-            else []
-        ),
+        "conflicts": [
+            {
+                "ref": (evidences_by_id.get(edge["to_evidence_id"]) or {}).get("ref"),
+                "path": ((evidences_by_id.get(edge["to_evidence_id"]) or {}).get("ref") or {}).get("path"),
+                "start_line": ((evidences_by_id.get(edge["to_evidence_id"]) or {}).get("ref") or {}).get("start_line"),
+                "reason": "claim_conflict",
+                "signals": (evidences_by_id.get(edge["to_evidence_id"]) or {}).get("signals") or [],
+                "score": (evidences_by_id.get(edge["to_evidence_id"]) or {}).get("score"),
+                "conflict_with": [edge["from_claim_id"]],
+                "gap_hint": None,
+            }
+            for edge in conflict_by_claim.values()
+        ],
+        "gaps": gap_rows,
         "integrated_top": [
             {**item, "reason": "ranked_by_integration"}
             for item in candidates[:20]
@@ -671,7 +1154,7 @@ def manual_find(
         }
     )
 
-    return {"trace_id": trace_id, "summary": summary, "next_actions": next_actions}
+    return {"trace_id": trace_id, "claim_graph": claim_graph, "summary": summary, "next_actions": next_actions}
 
 
 def manual_hits(
@@ -686,7 +1169,11 @@ def manual_hits(
     if payload is None:
         raise ToolError("not_found", "trace_id not found", {"trace_id": trace_id})
     applied_kind = kind or "candidates"
-    ensure(applied_kind in {"candidates", "unscanned", "conflicts", "gaps", "integrated_top"}, "invalid_parameter", "invalid kind")
+    ensure(
+        applied_kind in {"candidates", "unscanned", "conflicts", "gaps", "integrated_top", "claims", "evidences", "edges"},
+        "invalid_parameter",
+        "invalid kind",
+    )
     applied_offset = max(0, int(offset or 0))
     applied_limit = max(1, int(limit or 50))
 
@@ -696,8 +1183,16 @@ def manual_hits(
         "conflicts": "conflicts",
         "gaps": "gaps",
         "integrated_top": "integrated_top",
+        "claims": "claim_graph.claims",
+        "evidences": "claim_graph.evidences",
+        "edges": "claim_graph.edges",
     }
-    rows = payload.get(key_map[applied_kind], [])
+    mapped_key = key_map[applied_kind]
+    if "." in mapped_key:
+        parent, child = mapped_key.split(".", 1)
+        rows = (payload.get(parent) or {}).get(child, [])
+    else:
+        rows = payload.get(mapped_key, [])
     sliced = rows[applied_offset : applied_offset + applied_limit]
     return {
         "trace_id": trace_id,

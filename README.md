@@ -1,47 +1,58 @@
 # mcp_v2
 
-統合版MCPサーバ（v2）の設計・要件定義を置くフォルダです。
+`mcp_v2` は、manual/vault/bridge/tooling 系ツールを統合した FastMCP サーバーです。
 
-前提ディレクトリ構造（採用）:
+## Requirements
 
-- `manuals/<manual_id>/`
-- `vault/`
-  - `vault/daily/`（日次ログ用の予約領域）
-  - `vault/.system/`（システム管理用の予約領域）
-  - 上記以外は任意のプロジェクトフォルダを作成して利用
+- Python `3.12.x` (必須: `>=3.12,<3.13`)
+- macOS / Linux / Windows (stdio 実行を想定)
 
-## Docs
+## Quick Start (pip)
 
-- `docs/requirements.md`: 要件定義（目的、スコープ、機能/非機能、評価指標）
-- `docs/spec_v2.md`: 共通基盤仕様（Config、安全要件、共通ログ/出力、`next_actions`/`ref` モデル）
-- `docs/spec_manuals.md`: `manual_*` 仕様（探索Stage、I/Oスキーマ）
-- `docs/spec_vault.md`: `vault_*` / `vault_audit` 仕様（行レンジ走査、カバレッジ監査、I/Oスキーマ）
-- `docs/spec_bridge.md`: `bridge_*` 仕様（manual->vaultコピー、I/Oスキーマ）
-- `docs/spec_tooling.md`: `get_tooling_guide` 仕様（固定カタログと `first_tool`）
-- `docs/rag_design_v2.md`: RAG設計（探索ワークフロー、検索実装仕様、見落とし検知）
-
-## Implementation
-
-Python/FastMCP実装は `src/mcp_v2_server` にあります。
-実行ターゲットは Python `3.12` です。
-
-### Setup
-
-`uv` を使う場合:
+macOS / Linux:
 
 ```bash
-uv sync
-```
-
-`pip` を使う場合（`requirements.txt`）:
-
-```bash
+cd /path/to/mcp_v2
 python3.12 -m venv .venv
 source .venv/bin/activate
+python -m pip install -U pip
 pip install -r requirements.txt
 ```
 
-### Run (stdio)
+Windows (PowerShell):
+
+```powershell
+cd C:\path\to\mcp_v2
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -r requirements.txt
+```
+
+`requirements.txt` には `-e .` を含めているため、`mcp_v2_server` パッケージが editable install されます。
+
+## Quick Start (uv)
+
+```bash
+cd /path/to/mcp_v2
+uv sync
+```
+
+## Run Server (stdio)
+
+macOS / Linux:
+
+```bash
+source .venv/bin/activate
+python -m mcp_v2_server.app --stdio
+```
+
+Windows (PowerShell):
+
+```powershell
+.venv\Scripts\Activate.ps1
+python -m mcp_v2_server.app --stdio
+```
 
 `uv` の場合:
 
@@ -49,14 +60,50 @@ pip install -r requirements.txt
 uv run python -m mcp_v2_server.app --stdio
 ```
 
-`pip` の場合:
+## MCP Client Config Example (Codex)
+
+`config.toml` 例:
+
+```toml
+[mcp_servers.mcp-v2]
+command = "/absolute/path/to/mcp_v2/.venv/bin/python"
+args = ["-m", "mcp_v2_server.app", "--stdio"]
+```
+
+Windows 例 (`'...'` は TOML literal string):
+
+```toml
+[mcp_servers.mcp-v2]
+command = 'C:\absolute\path\to\mcp_v2\.venv\Scripts\python.exe'
+args = ["-m", "mcp_v2_server.app", "--stdio"]
+```
+
+注意:
+- Python が 3.12 以外（例: 3.14）の venv だと起動前に失敗します。
+- もし import エラーが出る場合は `pip install -r requirements.txt` を再実行してください。
+
+## Directory Layout
+
+- `manuals/<manual_id>/`
+- `vault/`
+- `src/mcp_v2_server/` (実装本体)
+- `docs/` (仕様・要件)
+
+## Test
+
+macOS / Linux:
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python -m mcp_v2_server.app --stdio
+pytest -q
 ```
 
-### Test
+Windows (PowerShell):
+
+```powershell
+.venv\Scripts\Activate.ps1
+pytest -q
+```
 
 `uv` の場合:
 
@@ -64,12 +111,15 @@ PYTHONPATH=src python -m mcp_v2_server.app --stdio
 uv run pytest -q
 ```
 
-`pip` の場合:
+## Main Docs
 
-```bash
-source .venv/bin/activate
-PYTHONPATH=src pytest -q
-```
+- `docs/requirements.md`
+- `docs/spec_v2.md`
+- `docs/spec_manuals.md`
+- `docs/spec_vault.md`
+- `docs/spec_bridge.md`
+- `docs/spec_tooling.md`
+- `docs/rag_design_v2.md`
 
 ## Environment Variables
 

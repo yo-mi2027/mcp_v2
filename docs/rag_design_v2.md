@@ -1,5 +1,10 @@
 # RAG設計書 v2（探索オーケストレーター方式）
 
+> 現行注記（2026-02-07）
+> この文書は探索設計ドラフト（非正本）であり、本文には現行未公開ツールの記述を含む。
+> 現行仕様は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を参照。
+> 現行公開ツールは `manual_ls`, `manual_toc`, `manual_find`, `manual_hits`, `manual_read`, `manual_scan`, `vault_create`, `vault_read`, `vault_scan`, `vault_replace`。
+
 ## 1. 目的
 
 「特定のものに関する情報を網羅的に取得して」という要求で抜け漏れが出やすい問題を、サーバ側の探索ワークフロー固定化で改善する。
@@ -23,9 +28,9 @@
 1. Prompt Parse（意図・制約・重要語の抽出）
 2. Query Plan（検索語セット + 戦略セット + 見落とし検知ルール）
 3. Execute（戦略を実行し、候補を合算）
-4. Integrate & Judge（Stage 0〜3候補を統合し、十分性/矛盾/欠落を判定）
+4. Integrate & Judge（Stage 0〜2候補を統合し、`claim_graph` を構築して十分性/矛盾/欠落を判定）
 5. Diagnose（統合判定の結果を受け、必要なら自動で再探索）
-6. Output（trace_id + summary）
+6. Output（`trace_id + claim_graph + summary`）
 
 追加:
 
@@ -74,7 +79,7 @@ v2では「LLMがその場で検索のやり方を組み立てる」のではな
 ### 検索戦略セット（Stage方式）
 
 v2では探索モード分岐は設けず、常に「抜け漏れを減らす探索」を既定にする。
-既定挙動は manual で Stage 0〜3 + 3.5 を常時実行し、Stage 4 のみ見落とし検知条件を満たしたときに実行する。vault では Stage 0〜1 + 1.5 を常時実行する。
+既定挙動は manual で Stage 0〜2 + 3.5 を常時実行し、Stage 4 のみ見落とし検知条件を満たしたときに実行する。vault では Stage 0〜1 + 1.5 を常時実行する。
 
 - Stage 0（ベース）:
   - `.md` node単位の「正規化部分一致（本文）」+「見出し一致（heading）」
@@ -83,19 +88,21 @@ v2では探索モード分岐は設けず、常に「抜け漏れを減らす探
   - 同義語/言い換え辞書で `soft_terms` を拡張し、拡張語にも正規化一致/loose一致を適用
 - Stage 2（例外特化）:
   - 例外語彙スキャン（exceptions辞書）
-- Stage 3（参照追跡）:
-  - “第X章参照”“別表”“〜に準ずる”等の参照を検出し候補追加
+  - Stage 2 では注釈シグナルとして扱い、単独では候補化トリガーにしない
 - Stage 3.5（統合判断）:
-  - Stage 0〜3の候補を `node_key(manual_id + path + start_line)` で統合
-  - `signals` と `hit_count` を集約し、矛盾候補（conflicts）と欠落候補（gaps）を抽出
+  - Stage 0〜2の候補を `node_key(manual_id + path + start_line)` で統合
+  - 統合後候補から `claim_graph`（`claims`, `evidences`, `edges`, `facets`）を構築
+  - `edges.relation` は `supports|contradicts|requires_followup` を最小セットとして扱う
+  - `claim_graph` を起点に矛盾候補（conflicts）と欠落候補（gaps）を抽出する
   - 十分性指標（`sufficiency_score`）を算出し `next_actions` の初期案を生成
 - Stage 4（範囲拡張）:
   - `manual_id` 指定がある場合は対象範囲を拡張（例: `MANUALS_ROOT` 配下の全manualへ）
   - または探索対象のファイル集合を拡張（設計次第。MVPでは「manual_id指定の解除」を優先）
+  - `intent=exceptions` の場合は、例外拡張を「局所（一次候補のpath）→同一manual→全manual」の順で段階実行する
   
 注記:
-- Stage 0〜3 は 1 ツールに集約し、Stage 2〜3 が失敗しても Stage 0〜1 の結果サマリは返す（部分成功）
-- Stage 3.5 は Stage 0〜3 の結果が部分成功でも実行し、利用可能候補のみで統合判断する
+- Stage 0〜2 は 1 ツールに集約し、Stage 2 が失敗しても Stage 0〜1 の結果サマリは返す（部分成功）
+- Stage 3.5 は Stage 0〜2 の結果が部分成功でも実行し、利用可能候補のみで `claim_graph` を構築する
 - `manual_find.max_stage` は `3|4` のみ許可する（`3` は Stage 4無効、`4` は Stage 4条件付き有効、`0|1|2` は `invalid_parameter`）
 - Stage 3.5 は `max_stage` の値に関わらず常時実行する（`max_stage` は Stage 4 の許可有無のみを制御）
 - Stage 4 の発火条件（閾値）:
@@ -133,18 +140,17 @@ vault向け Stage 1.5（統合判断）:
   4. `soft_terms` の一致（loose）
   5. 同義語/言い換え展開語の一致（loose）
   6. 例外語彙スキャン（exceptions辞書）
-  7. 参照追跡（“第X章参照” 等）
 
 ### 見落とし検知（Diagnose）とエスカレーション
 
-既定で Stage 0〜3.5 は実施済みとし、以下の条件でエスカレーションする。
+既定で Stage 0〜2 と Stage 3.5 は実施済みとし、以下の条件でエスカレーションする。
 
 - Stage 4 の初期発火条件（固定）:
   - S0が0件
   - S0が少ない（例: 3件未満）
   - 1ファイルに偏っている（例: S0の80%以上が同一ファイル）
   - `intent=exceptions` で例外ヒットが0
-- 統合判断由来の追加条件:
+- 統合判断（`claim_graph`）由来の追加条件:
   - `conflict_count > 0`（要追加読取または追加探索）
   - `gap_count > 0`（未カバー観点あり）
 
@@ -222,7 +228,7 @@ exceptions辞書に基づき、行/段落を走査して候補を生成する。
 固定方針:
 
 - `next_actions.type` は「次に呼ぶツール名」を返す
-- 意図や理由は `next_actions.params` と summary 指標で表現する
+- 意図や理由は `next_actions.params` と `claim_graph` / summary 指標で表現する
 
 運用最適化（軽量・永続）:
 
@@ -247,9 +253,10 @@ exceptions辞書に基づき、行/段落を走査して候補を生成する。
 `manual_find` は原則本文を返さない。
 
 - ユーザー向け出力（text）: `trace_id` / 指標サマリのみ
-- ツール間連携の内部情報（structuredContent）: 候補IDや短いダイジェスト等（ユーザー表示には出さない）
+- ツール間連携の内部情報（structuredContent）: `claim_graph` と候補IDや短いダイジェスト等（ユーザー表示には出さない）
 - `unscanned_sections` は summary では件数中心とし、詳細列挙は `manual_hits(kind="unscanned")` に委譲する。
 - 統合判断で抽出した `conflicts` / `gaps` の詳細は `manual_hits(kind="conflicts|gaps")` に委譲する。
+- `claim_graph` の詳細は `manual_hits(kind="claims|evidences|edges")` に委譲してページング取得できるようにする。
 
 本文が必要な場合のみ、後続で `manual_read(...)` を呼ぶ。
 
@@ -260,7 +267,7 @@ MVPではExploreのサーバ側レポート出力は行わない（チャット�
 ### 出力最小化と判断材料の分離
 
 - ユーザー向け出力（text）は最小化し、`trace_id` / 指標サマリのみ返す。
-- LLMの後続判断のための材料（候補ID、上位N件の短いダイジェスト等）は `structuredContent` にのみ含め、ユーザー表示には出さない。
+- LLMの後続判断のための材料（`claim_graph`、候補ID、上位N件の短いダイジェスト等）は `structuredContent` にのみ含め、ユーザー表示には出さない。
 - 打ち切りが発生した場合は `cutoff_reason` を summary に含め、それ以外は省略する。
 - 整理済みの説明や図解などの成果物が必要な場合は、`vault_create` / `vault_write` / `vault_replace` 等の `vault_*` ツールで `VAULT_ROOT` 配下の任意プロジェクトフォルダに保存/更新し、チャットは要約＋保存先のみとする（Produce）。
 - 「成果物」だけでなく、単なる疑問点解消のための詳細説明をファイルに残したい場合も同様に `vault_*` を使う（Produce）。
