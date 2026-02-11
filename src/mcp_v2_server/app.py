@@ -134,7 +134,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
         path: str,
         start_line: int | None = None,
         cursor: dict[str, Any] | None = None,
-        chunk_lines: int | None = None,
         limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _execute(
@@ -146,7 +145,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 path=path,
                 start_line=start_line,
                 cursor=cursor,
-                chunk_lines=chunk_lines,
                 limits=limits,
             ),
         )
@@ -177,7 +175,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
         path: str,
         start_line: int | None = None,
         cursor: dict[str, Any] | None = None,
-        chunk_lines: int | None = None,
         limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _execute(
@@ -188,7 +185,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 path=path,
                 start_line=start_line,
                 cursor=cursor,
-                chunk_lines=chunk_lines,
                 limits=limits,
             ),
         )

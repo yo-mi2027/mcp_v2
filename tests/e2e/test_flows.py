@@ -19,6 +19,6 @@ def test_manual_flow_e2e(state) -> None:
 
 
 def test_vault_flow_e2e(state) -> None:
-    scan = vault_scan(state, path="source.md", cursor={"start_line": 1}, chunk_lines=2)
+    scan = vault_scan(state, path="source.md", cursor={"start_line": 1})
     assert scan["applied_range"]["start_line"] == 1
     assert "next_actions" not in scan

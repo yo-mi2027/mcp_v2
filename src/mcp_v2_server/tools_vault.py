@@ -13,6 +13,8 @@ from .path_guard import (
 )
 from .state import AppState
 
+SCAN_MAX_CHARS = 9000
+
 
 def _parse_int_param(
     value: Any,
@@ -42,6 +44,39 @@ def _resolve_max_chars(state: AppState, limits: dict[str, Any] | None) -> int:
         min_value=1,
     )
     return min(max_chars, state.config.hard_max_chars)
+
+
+def _resolve_scan_max_chars(limits: dict[str, Any] | None) -> int:
+    if limits and limits.get("max_chars") is not None:
+        raise ToolError("invalid_parameter", "limits.max_chars is fixed and cannot be changed")
+    return SCAN_MAX_CHARS
+
+
+def _char_offset_from_line(text: str, line_no: int) -> int:
+    if line_no <= 1:
+        return 0
+    offset = 0
+    for _ in range(1, line_no):
+        next_break = text.find("\n", offset)
+        if next_break < 0:
+            raise ToolError("invalid_parameter", "start_line out of range")
+        offset = next_break + 1
+    return offset
+
+
+def _line_from_char_offset(text: str, offset: int) -> int:
+    if not text:
+        return 1
+    bounded = min(max(0, offset), len(text))
+    return text.count("\n", 0, bounded) + 1
+
+
+def _char_offset_after_line(text: str, line_no: int) -> int:
+    start = _char_offset_from_line(text, line_no)
+    next_break = text.find("\n", start)
+    if next_break < 0:
+        return len(text)
+    return next_break + 1
 
 
 def _range_from_lines(total: int, range_obj: dict[str, Any] | None) -> tuple[int, int]:
@@ -83,12 +118,14 @@ def vault_read(
     elif not full and end_line < total:
         truncated_reason = "range_end"
 
+    next_cursor = None if end_line >= total else _char_offset_after_line(text, end_line)
+
     return {
         "text": selected,
         "truncated": truncated_reason != "none",
         "returned_chars": len(selected),
         "applied_range": {"start_line": start_line, "end_line": end_line},
-        "next_cursor": {"start_line": None if end_line >= total else end_line + 1},
+        "next_cursor": {"char_offset": next_cursor},
         "truncated_reason": truncated_reason,
         "applied": {"full": full, "max_chars": max_chars},
     }
@@ -139,53 +176,50 @@ def vault_scan(
     path: str,
     start_line: int | None = None,
     cursor: dict[str, Any] | None = None,
-    chunk_lines: int | None = None,
     limits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_relative_path(path)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     text = target.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    total = max(1, len(lines))
+    max_chars = _resolve_scan_max_chars(limits)
+    legacy_start_line = start_line if start_line is not None else (cursor or {}).get("start_line")
 
-    applied_start_line = _parse_int_param(
-        start_line if start_line is not None else (cursor or {}).get("start_line"),
-        name="start_line",
-        default=1,
-        min_value=1,
-    )
-    applied_chunk = _parse_int_param(
-        chunk_lines,
-        name="chunk_lines",
-        default=state.config.vault_scan_default_chunk_lines,
-        min_value=1,
-        max_value=state.config.vault_scan_max_chunk_lines,
-    )
-    ensure(
-        1 <= applied_chunk <= state.config.vault_scan_max_chunk_lines,
-        "invalid_parameter",
-        "chunk_lines out of range",
-    )
-    ensure(1 <= applied_start_line <= total, "invalid_parameter", "start_line out of range")
+    if (cursor or {}).get("char_offset") is not None:
+        applied_start_offset = _parse_int_param(
+            (cursor or {}).get("char_offset"),
+            name="cursor.char_offset",
+            default=0,
+            min_value=0,
+        )
+    elif legacy_start_line is not None:
+        parsed_start_line = _parse_int_param(
+            legacy_start_line,
+            name="start_line",
+            default=1,
+            min_value=1,
+        )
+        applied_start_offset = _char_offset_from_line(text, parsed_start_line)
+    else:
+        applied_start_offset = 0
 
-    end_line = min(total, applied_start_line + applied_chunk - 1)
-    chunk_text = "\n".join(lines[applied_start_line - 1 : end_line])
-    max_chars = _resolve_max_chars(state, limits)
+    ensure(applied_start_offset <= len(text), "invalid_parameter", "cursor.char_offset out of range")
+    end_offset = min(len(text), applied_start_offset + max_chars)
+    chunk_text = text[applied_start_offset:end_offset]
+    start_line_no = _line_from_char_offset(text, applied_start_offset)
+    if end_offset <= applied_start_offset:
+        end_line_no = start_line_no
+    else:
+        end_line_no = _line_from_char_offset(text, end_offset - 1)
 
-    truncated_reason = "none"
-    if len(chunk_text) > max_chars:
-        chunk_text = chunk_text[:max_chars]
-        truncated_reason = "hard_limit" if max_chars >= state.config.hard_max_chars else "max_chars"
-    elif end_line < total:
-        truncated_reason = "chunk_end"
-    eof = end_line >= total
+    truncated_reason = "none" if end_offset >= len(text) else "max_chars"
+    eof = end_offset >= len(text)
 
     return {
         "text": chunk_text,
-        "applied_range": {"start_line": applied_start_line, "end_line": end_line},
-        "next_cursor": {"start_line": None if eof else end_line + 1},
+        "applied_range": {"start_line": start_line_no, "end_line": end_line_no},
+        "next_cursor": {"char_offset": None if eof else end_offset},
         "eof": eof,
         "truncated": truncated_reason != "none",
         "truncated_reason": truncated_reason,
-        "applied": {"chunk_lines": applied_chunk, "max_chars": max_chars},
+        "applied": {"max_chars": max_chars},
     }

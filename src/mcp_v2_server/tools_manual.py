@@ -45,6 +45,7 @@ FACET_HINTS = {
     key: [normalize_text(word) for word in words]
     for key, words in FACET_HINTS_RAW.items()
 }
+SCAN_MAX_CHARS = 9000
 
 
 def _parse_int_param(
@@ -219,13 +220,28 @@ def _resolve_read_limits(state: AppState, limits: dict[str, Any] | None) -> tupl
 
 
 def _resolve_scan_max_chars(state: AppState, limits: dict[str, Any] | None) -> int:
-    max_chars = _parse_int_param(
-        (limits or {}).get("max_chars"),
-        name="limits.max_chars",
-        default=state.config.hard_max_chars,
-        min_value=1,
-    )
-    return min(max_chars, state.config.hard_max_chars)
+    if limits and limits.get("max_chars") is not None:
+        raise ToolError("invalid_parameter", "limits.max_chars is fixed and cannot be changed")
+    return SCAN_MAX_CHARS
+
+
+def _char_offset_from_line(text: str, line_no: int) -> int:
+    if line_no <= 1:
+        return 0
+    offset = 0
+    for _ in range(1, line_no):
+        next_break = text.find("\n", offset)
+        if next_break < 0:
+            raise ToolError("invalid_parameter", "start_line out of range")
+        offset = next_break + 1
+    return offset
+
+
+def _line_from_char_offset(text: str, offset: int) -> int:
+    if not text:
+        return 1
+    bounded = min(max(0, offset), len(text))
+    return text.count("\n", 0, bounded) + 1
 
 
 def manual_read(
@@ -295,13 +311,13 @@ def manual_read(
                         manual_id=manual_id,
                         path=relative_path,
                         start_line=fallback_start,
-                        chunk_lines=state.config.vault_scan_default_chunk_lines,
-                        limits={"max_chars": max_chars},
                     )
                     output = str(scan.get("text") or "")
                     truncated = bool(scan.get("truncated"))
                     applied_mode = "scan_fallback"
-                    next_scan_start = ((scan.get("next_cursor") or {}).get("start_line")) or (len(lines) + 1)
+                    applied_range = scan.get("applied_range") or {}
+                    eof = bool(scan.get("eof"))
+                    next_scan_start = (len(lines) + 1) if eof else (int(applied_range.get("end_line") or section_end) + 1)
                     state.read_progress[key] = {
                         "last_section_start": section_start,
                         "last_section_end": section_end,
@@ -372,7 +388,6 @@ def manual_scan(
     path: str,
     start_line: int | None = None,
     cursor: dict[str, Any] | None = None,
-    chunk_lines: int | None = None,
     limits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ensure(_manual_exists(state.config.manuals_root, manual_id), "not_found", "manual_id not found", {"manual_id": manual_id})
@@ -381,51 +396,50 @@ def manual_scan(
     ensure(full_path.exists() and full_path.is_file(), "not_found", "manual file not found", {"path": relative_path})
 
     text = full_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    total = max(1, len(lines))
-
-    applied_start_line = _parse_int_param(
-        start_line if start_line is not None else (cursor or {}).get("start_line"),
-        name="start_line",
-        default=1,
-        min_value=1,
-    )
-    applied_chunk = _parse_int_param(
-        chunk_lines,
-        name="chunk_lines",
-        default=state.config.vault_scan_default_chunk_lines,
-        min_value=1,
-        max_value=state.config.vault_scan_max_chunk_lines,
-    )
-    ensure(
-        1 <= applied_chunk <= state.config.vault_scan_max_chunk_lines,
-        "invalid_parameter",
-        "chunk_lines out of range",
-    )
-    ensure(1 <= applied_start_line <= total, "invalid_parameter", "start_line out of range")
-
-    end_line = min(total, applied_start_line + applied_chunk - 1)
-    chunk_text = "\n".join(lines[applied_start_line - 1 : end_line])
     max_chars = _resolve_scan_max_chars(state, limits)
+    legacy_start_line = start_line if start_line is not None else (cursor or {}).get("start_line")
 
-    truncated_reason = "none"
-    if len(chunk_text) > max_chars:
-        chunk_text = chunk_text[:max_chars]
-        truncated_reason = "hard_limit" if max_chars >= state.config.hard_max_chars else "max_chars"
-    elif end_line < total:
-        truncated_reason = "chunk_end"
-    eof = end_line >= total
+    if (cursor or {}).get("char_offset") is not None:
+        applied_start_offset = _parse_int_param(
+            (cursor or {}).get("char_offset"),
+            name="cursor.char_offset",
+            default=0,
+            min_value=0,
+        )
+    elif legacy_start_line is not None:
+        parsed_start_line = _parse_int_param(
+            legacy_start_line,
+            name="start_line",
+            default=1,
+            min_value=1,
+        )
+        applied_start_offset = _char_offset_from_line(text, parsed_start_line)
+    else:
+        applied_start_offset = 0
+
+    ensure(applied_start_offset <= len(text), "invalid_parameter", "cursor.char_offset out of range")
+    end_offset = min(len(text), applied_start_offset + max_chars)
+    chunk_text = text[applied_start_offset:end_offset]
+
+    start_line_no = _line_from_char_offset(text, applied_start_offset)
+    if end_offset <= applied_start_offset:
+        end_line_no = start_line_no
+    else:
+        end_line_no = _line_from_char_offset(text, end_offset - 1)
+
+    truncated_reason = "none" if end_offset >= len(text) else "max_chars"
+    eof = end_offset >= len(text)
 
     return {
         "manual_id": manual_id,
         "path": relative_path,
         "text": chunk_text,
-        "applied_range": {"start_line": applied_start_line, "end_line": end_line},
-        "next_cursor": {"start_line": None if eof else end_line + 1},
+        "applied_range": {"start_line": start_line_no, "end_line": end_line_no},
+        "next_cursor": {"char_offset": None if eof else end_offset},
         "eof": eof,
         "truncated": truncated_reason != "none",
         "truncated_reason": truncated_reason,
-        "applied": {"chunk_lines": applied_chunk, "max_chars": max_chars},
+        "applied": {"max_chars": max_chars},
     }
 
 

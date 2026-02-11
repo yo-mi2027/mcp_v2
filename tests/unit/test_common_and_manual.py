@@ -150,46 +150,40 @@ def test_manual_read_rejects_invalid_scope(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
-def test_manual_scan_chunk_lines_range(state) -> None:
-    with pytest.raises(ToolError) as e:
-        manual_scan(state, manual_id="m1", path="rules.md", chunk_lines=999)
-    assert e.value.code == "invalid_parameter"
+def test_manual_scan_uses_fixed_max_chars(state) -> None:
+    out = manual_scan(state, manual_id="m1", path="rules.md")
+    assert out["applied"]["max_chars"] == 9000
 
 
 def test_manual_scan_paginates_until_eof(state) -> None:
-    first = manual_scan(state, manual_id="m1", path="rules.md", chunk_lines=2)
-    assert first["applied_range"] == {"start_line": 1, "end_line": 2}
+    text = ("a" * 9050) + "\nend\n"
+    (state.config.manuals_root / "m1" / "long.md").write_text(text, encoding="utf-8")
+    first = manual_scan(state, manual_id="m1", path="long.md")
+    assert first["applied_range"] == {"start_line": 1, "end_line": 1}
     assert first["eof"] is False
-    assert first["truncated_reason"] == "chunk_end"
-    assert first["next_cursor"]["start_line"] == 3
+    assert first["truncated_reason"] == "max_chars"
+    assert first["next_cursor"]["char_offset"] == 9000
 
     second = manual_scan(
         state,
         manual_id="m1",
-        path="rules.md",
+        path="long.md",
         cursor=first["next_cursor"],
-        chunk_lines=20,
     )
     assert second["eof"] is True
     assert second["truncated_reason"] == "none"
-    assert second["next_cursor"]["start_line"] is None
+    assert second["next_cursor"]["char_offset"] is None
+    assert len(first["text"]) + len(second["text"]) == len(text)
 
 
 def test_manual_scan_accepts_start_line_without_cursor(state) -> None:
-    out = manual_scan(state, manual_id="m1", path="rules.md", start_line=3, chunk_lines=2)
-    assert out["applied_range"] == {"start_line": 3, "end_line": 4}
+    out = manual_scan(state, manual_id="m1", path="rules.md", start_line=3)
+    assert out["applied_range"] == {"start_line": 3, "end_line": 6}
 
 
-def test_manual_scan_truncates_by_max_chars(state) -> None:
-    out = manual_scan(state, manual_id="m1", path="rules.md", chunk_lines=20, limits={"max_chars": 5})
-    assert out["truncated"] is True
-    assert out["truncated_reason"] == "max_chars"
-    assert len(out["text"]) == 5
-
-
-def test_manual_scan_rejects_non_integer_chunk_lines(state) -> None:
+def test_manual_scan_rejects_max_chars_override(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_scan(state, manual_id="m1", path="rules.md", chunk_lines="abc")
+        manual_scan(state, manual_id="m1", path="rules.md", limits={"max_chars": 5})
     assert e.value.code == "invalid_parameter"
 
 
