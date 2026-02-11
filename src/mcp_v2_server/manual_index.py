@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import os
 from dataclasses import dataclass
@@ -115,16 +114,3 @@ def parse_markdown_toc(relative_path: str, text: str) -> list[MdNode]:
         nodes.append(node)
         stack.append(node)
     return nodes
-
-
-def load_manual_file(manuals_root: Path, manual_id: str, relative_path: str) -> str:
-    path = manuals_root / manual_id / relative_path
-    return path.read_text(encoding="utf-8")
-
-
-def json_line_count(text: str) -> int:
-    try:
-        pretty = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
-        return len(pretty.splitlines()) or 1
-    except json.JSONDecodeError:
-        return len(text.splitlines()) or 1

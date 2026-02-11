@@ -66,17 +66,6 @@ def resolve_inside_root(root: Path, relative: str, *, must_exist: bool = False) 
     return resolved
 
 
-def is_system_path(relative: str) -> bool:
-    normalized = normalize_relative_path(relative)
-    lower = normalized.casefold()
-    return lower == ".system" or lower.startswith(".system/")
-
-
-def is_daily_path(relative: str) -> bool:
-    normalized = normalize_relative_path(relative)
-    return normalized.casefold().startswith("daily/")
-
-
 def is_daily_path_under_root(vault_root: Path, relative: str) -> bool:
     normalized = normalize_relative_path(relative)
     daily_root = (vault_root / "daily").resolve()
