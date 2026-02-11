@@ -86,6 +86,6 @@ class Config:
             trace_ttl_sec=_env_int("TRACE_TTL_SEC", 1800),
             allow_file_scope=_env_bool("ALLOW_FILE_SCOPE", False),
             hard_max_sections=_env_int("HARD_MAX_SECTIONS", 20),
-            hard_max_chars=_env_int("HARD_MAX_CHARS", 20000),
+            hard_max_chars=_env_int("HARD_MAX_CHARS", 12000),
             default_max_stage=default_max_stage,
         )

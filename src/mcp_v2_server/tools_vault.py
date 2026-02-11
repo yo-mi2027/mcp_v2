@@ -88,8 +88,9 @@ def vault_read(
         "truncated": truncated_reason != "none",
         "returned_chars": len(selected),
         "applied_range": {"start_line": start_line, "end_line": end_line},
-        "next_offset": {"start_line": None if end_line >= total else end_line + 1},
+        "next_cursor": {"start_line": None if end_line >= total else end_line + 1},
         "truncated_reason": truncated_reason,
+        "applied": {"full": full, "max_chars": max_chars},
     }
 
 
@@ -136,6 +137,7 @@ def vault_replace(state: AppState, path: str, find: str, replace: str, max_repla
 def vault_scan(
     state: AppState,
     path: str,
+    start_line: int | None = None,
     cursor: dict[str, Any] | None = None,
     chunk_lines: int | None = None,
     limits: dict[str, Any] | None = None,
@@ -146,7 +148,12 @@ def vault_scan(
     lines = text.splitlines()
     total = max(1, len(lines))
 
-    start_line = _parse_int_param((cursor or {}).get("start_line"), name="cursor.start_line", default=1, min_value=1)
+    applied_start_line = _parse_int_param(
+        start_line if start_line is not None else (cursor or {}).get("start_line"),
+        name="start_line",
+        default=1,
+        min_value=1,
+    )
     applied_chunk = _parse_int_param(
         chunk_lines,
         name="chunk_lines",
@@ -159,10 +166,10 @@ def vault_scan(
         "invalid_parameter",
         "chunk_lines out of range",
     )
-    ensure(1 <= start_line <= total, "invalid_parameter", "cursor.start_line out of range")
+    ensure(1 <= applied_start_line <= total, "invalid_parameter", "start_line out of range")
 
-    end_line = min(total, start_line + applied_chunk - 1)
-    chunk_text = "\n".join(lines[start_line - 1 : end_line])
+    end_line = min(total, applied_start_line + applied_chunk - 1)
+    chunk_text = "\n".join(lines[applied_start_line - 1 : end_line])
     max_chars = _resolve_max_chars(state, limits)
 
     truncated_reason = "none"
@@ -175,9 +182,10 @@ def vault_scan(
 
     return {
         "text": chunk_text,
-        "applied_range": {"start_line": start_line, "end_line": end_line},
+        "applied_range": {"start_line": applied_start_line, "end_line": end_line},
         "next_cursor": {"start_line": None if eof else end_line + 1},
         "eof": eof,
         "truncated": truncated_reason != "none",
         "truncated_reason": truncated_reason,
+        "applied": {"chunk_lines": applied_chunk, "max_chars": max_chars},
     }

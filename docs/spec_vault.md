@@ -6,7 +6,7 @@
 
 - `vault_create({ path, content })`
 - `vault_read({ path, full?, range?, limits? })`
-- `vault_scan({ path, cursor?, chunk_lines?, limits? })`
+- `vault_scan({ path, start_line?, cursor?, chunk_lines?, limits? })`
 - `vault_replace({ path, find, replace, max_replacements? })`
 
 ## 2. `vault_create`
@@ -73,10 +73,14 @@ Output:
     "start_line": "number",
     "end_line": "number"
   },
-  "next_offset": {
+  "next_cursor": {
     "start_line": "number | null"
   },
-  "truncated_reason": "none|range_end|max_chars|hard_limit"
+  "truncated_reason": "none|range_end|max_chars|hard_limit",
+  "applied": {
+    "full": "boolean",
+    "max_chars": "number"
+  }
 }
 ```
 
@@ -87,6 +91,7 @@ Input:
 ```json
 {
   "path": "string",
+  "start_line": "number | null",
   "cursor": {
     "start_line": "number | null"
   },
@@ -99,8 +104,8 @@ Input:
 
 固定ルール:
 
-- `cursor.start_line` 既定: `1`
-- `cursor.start_line` は整数かつ対象ファイルの総行数範囲内
+- `start_line` 指定時はそれを優先し、未指定時は `cursor.start_line`（未指定なら1）を使う
+- `start_line`（または `cursor.start_line`）は整数かつ対象ファイルの総行数範囲内
 - `chunk_lines` 既定: `VAULT_SCAN_DEFAULT_CHUNK_LINES`
 - `chunk_lines` は整数かつ `1..VAULT_SCAN_MAX_CHUNK_LINES`
 - `limits.max_chars` は整数かつ `>= 1`、`HARD_MAX_CHARS` で上限制限
@@ -119,7 +124,11 @@ Output:
   },
   "eof": "boolean",
   "truncated": "boolean",
-  "truncated_reason": "none|chunk_end|max_chars|hard_limit"
+  "truncated_reason": "none|chunk_end|max_chars|hard_limit",
+  "applied": {
+    "chunk_lines": "number",
+    "max_chars": "number"
+  }
 }
 ```
 

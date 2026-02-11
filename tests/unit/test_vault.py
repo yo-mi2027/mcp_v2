@@ -32,15 +32,16 @@ def test_vault_read_rejects_out_of_range_start_line(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
-def test_vault_read_rejects_non_integer_range_start_line(state) -> None:
+@pytest.mark.parametrize(
+    ("range_obj", "limits"),
+    [
+        ({"start_line": "abc", "end_line": 2}, None),
+        ({"start_line": 1, "end_line": 2}, {"max_chars": -1}),
+    ],
+)
+def test_vault_read_rejects_invalid_numeric_parameters(state, range_obj, limits) -> None:
     with pytest.raises(ToolError) as e:
-        vault_read(state, path="source.md", full=False, range={"start_line": "abc", "end_line": 2})
-    assert e.value.code == "invalid_parameter"
-
-
-def test_vault_read_rejects_negative_max_chars(state) -> None:
-    with pytest.raises(ToolError) as e:
-        vault_read(state, path="source.md", full=False, range={"start_line": 1, "end_line": 2}, limits={"max_chars": -1})
+        vault_read(state, path="source.md", full=False, range=range_obj, limits=limits)
     assert e.value.code == "invalid_parameter"
 
 
@@ -81,10 +82,23 @@ def test_vault_scan_rejects_non_integer_cursor_start_line(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
-def test_vault_read_returns_offsets_without_next_actions(state) -> None:
+def test_vault_read_returns_cursor_without_next_actions(state) -> None:
     out = vault_read(state, path="source.md", full=False, range={"start_line": 1, "end_line": 2})
     assert out["applied_range"]["start_line"] == 1
+    assert out["next_cursor"]["start_line"] == 3
+    assert out["applied"]["full"] is False
     assert "next_actions" not in out
+
+
+def test_vault_scan_accepts_start_line_without_cursor(state) -> None:
+    out = vault_scan(state, path="source.md", start_line=3, chunk_lines=2)
+    assert out["applied_range"] == {"start_line": 3, "end_line": 4}
+    assert out["applied"]["chunk_lines"] == 2
+
+
+def test_vault_scan_start_line_takes_precedence_over_cursor(state) -> None:
+    out = vault_scan(state, path="source.md", start_line=4, cursor={"start_line": 1}, chunk_lines=1)
+    assert out["applied_range"] == {"start_line": 4, "end_line": 4}
 
 
 def test_execute_logs_vault_extension_fields(state, capsys) -> None:

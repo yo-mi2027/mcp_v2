@@ -175,6 +175,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
     @mcp.tool()
     def vault_scan(
         path: str,
+        start_line: int | None = None,
         cursor: dict[str, Any] | None = None,
         chunk_lines: int | None = None,
         limits: dict[str, Any] | None = None,
@@ -182,7 +183,14 @@ def create_app(state: AppState | None = None) -> FastMCP:
         return _execute(
             app_state,
             "vault_scan",
-            lambda: vault_scan_impl(app_state, path=path, cursor=cursor, chunk_lines=chunk_lines, limits=limits),
+            lambda: vault_scan_impl(
+                app_state,
+                path=path,
+                start_line=start_line,
+                cursor=cursor,
+                chunk_lines=chunk_lines,
+                limits=limits,
+            ),
         )
 
     @mcp.tool()

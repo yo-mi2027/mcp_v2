@@ -37,7 +37,7 @@
 - `TRACE_TTL_SEC`（既定: `1800`）
 - `ALLOW_FILE_SCOPE`（既定: `false`）
 - `HARD_MAX_SECTIONS`（既定: `20`）
-- `HARD_MAX_CHARS`（既定: `20000`）
+- `HARD_MAX_CHARS`（既定: `12000`）
 - `DEFAULT_MAX_STAGE`（既定: `4`、許容値: `3|4`）
 - `VAULT_SCAN_DEFAULT_CHUNK_LINES`（既定: `80`）
 - `VAULT_SCAN_MAX_CHUNK_LINES`（既定: `200`）

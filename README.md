@@ -237,5 +237,5 @@ uv run pytest -q
 - `TRACE_TTL_SEC` (default: `1800`)
 - `ALLOW_FILE_SCOPE` (default: `false`)
 - `HARD_MAX_SECTIONS` (default: `20`)
-- `HARD_MAX_CHARS` (default: `20000`)
+- `HARD_MAX_CHARS` (default: `12000`)
 - `DEFAULT_MAX_STAGE` (default: `4`, allowed: `3|4`)
