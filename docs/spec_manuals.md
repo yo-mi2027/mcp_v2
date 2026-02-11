@@ -4,7 +4,7 @@
 
 ## 1. Tool Catalog
 
-- `manual_ls({ manual_id? })`
+- `manual_ls({ id? })`
 - `manual_toc({ manual_id })`
 - `manual_find({ query, manual_id?, intent?, max_stage?, only_unscanned_from_trace_id?, budget?, include_claim_graph? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
@@ -17,7 +17,7 @@ Input:
 
 ```json
 {
-  "manual_id": "string | null"
+  "id": "string | null"
 }
 ```
 
@@ -25,14 +25,26 @@ Output:
 
 ```json
 {
+  "id": "string",
   "items": [
     {
-      "manual_id": "string",
-      "paths": ["string"]
+      "id": "string",
+      "name": "string",
+      "kind": "dir|file",
+      "path?": "string",
+      "file_type?": "md|json"
     }
   ]
 }
 ```
+
+固定ルール:
+
+- `id` 未指定時は `manuals` を適用する。
+- `id=manuals` は `MANUALS_ROOT` 直下の manual ディレクトリのみ返す（1階層）。
+- manual ディレクトリ `id` を指定すると、その直下の子要素のみ返す（再帰しない）。
+- ディレクトリ子は `kind=dir`、対象拡張子（`.md/.json`）のファイルは `kind=file` を返す。
+- file `id` は展開不可（`invalid_parameter`）。
 
 ## 3. `manual_toc`
 

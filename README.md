@@ -137,10 +137,10 @@ args = ["-m", "mcp_v2_server.app", "--stdio"]
 
 MCPクライアントから次を順に呼び出してください。
 
-1. `manual_ls`
-2. `manual_toc`（`manual_id` を指定）
-3. `manual_find`（`query` を指定）
-4. `manual_hits`（`trace_id` を指定）
+1. `manual_ls({ id: "manuals" })` で manual 一覧を取得
+2. 返ってきた `dir` の `id` を `manual_ls` に渡して、1階層ずつ辿る
+3. 必要な manual を `manual_toc` / `manual_find` で読む
+4. `manual_find` の結果 `trace_id` を `manual_hits` に渡す
 
 これで「一覧 -> 検索 -> 詳細取得」の一連動作を確認できます。
 

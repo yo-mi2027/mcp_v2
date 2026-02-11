@@ -49,11 +49,37 @@ def test_manual_toc_groups_headings_by_path(state) -> None:
     assert all("title" in h and "line_start" in h for h in rules["headings"])
 
 
-def test_manual_ls_groups_paths_by_manual_id(state) -> None:
-    out = manual_ls(state)
-    m1 = next(x for x in out["items"] if x["manual_id"] == "m1")
-    assert "rules.md" in m1["paths"]
-    assert "policy.json" in m1["paths"]
+def test_manual_ls_navigates_one_level_by_id(state) -> None:
+    root = manual_ls(state, id="manuals")
+    assert root["id"] == "manuals"
+    assert {item["name"] for item in root["items"]} == {"m1", "m2"}
+    m1_node = next(item for item in root["items"] if item["name"] == "m1")
+    assert m1_node["kind"] == "dir"
+
+    manual_dir = state.config.manuals_root / "m1"
+    (manual_dir / "sub").mkdir(parents=True, exist_ok=True)
+    (manual_dir / "sub" / "more.md").write_text("# more\n", encoding="utf-8")
+    second = manual_ls(state, id=m1_node["id"])
+    assert second["id"] == m1_node["id"]
+    names = {item["name"] for item in second["items"]}
+    assert "rules.md" in names
+    assert "policy.json" in names
+    assert "sub" in names
+
+    sub_node = next(item for item in second["items"] if item["name"] == "sub")
+    assert sub_node["kind"] == "dir"
+    third = manual_ls(state, id=sub_node["id"])
+    assert {item["name"] for item in third["items"]} == {"more.md"}
+
+
+def test_manual_ls_rejects_file_id_expansion(state) -> None:
+    root = manual_ls(state, id="manuals")
+    m1_node = next(item for item in root["items"] if item["name"] == "m1")
+    second = manual_ls(state, id=m1_node["id"])
+    file_node = next(item for item in second["items"] if item["name"] == "rules.md")
+    with pytest.raises(ToolError) as e:
+        manual_ls(state, id=file_node["id"])
+    assert e.value.code == "invalid_parameter"
 
 
 def test_manual_read_json_section_scope_is_invalid(state) -> None:

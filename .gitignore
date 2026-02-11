@@ -1,6 +1,21 @@
-# Local data roots
-manuals/
-vault/
+# Shared data policy
+# manuals: share only top-level category directories (one level under manuals/)
+manuals/**
+!manuals/
+!manuals/*/
+manuals/*/**
+!manuals/*/.gitkeep
+
+# vault: share top-level entries and all files under .system/
+vault/**
+!vault/
+!vault/*/
+!vault/README.md
+vault/*/**
+!vault/*/.gitkeep
+!vault/.system/
+!vault/.system/**
+vault/.system/adaptive_stats.jsonl
 
 # Python environment/cache
 .venv/

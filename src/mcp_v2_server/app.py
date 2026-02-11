@@ -83,8 +83,8 @@ def create_app(state: AppState | None = None) -> FastMCP:
     mcp = FastMCP("mcp_v2_server")
 
     @mcp.tool()
-    def manual_ls(manual_id: str | None = None) -> dict[str, Any]:
-        return _execute(app_state, "manual_ls", lambda: manual_ls_impl(app_state, manual_id=manual_id))
+    def manual_ls(id: str | None = None) -> dict[str, Any]:
+        return _execute(app_state, "manual_ls", lambda: manual_ls_impl(app_state, id=id))
 
     @mcp.tool()
     def manual_toc(manual_id: str) -> dict[str, Any]:

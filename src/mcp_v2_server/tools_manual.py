@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import base64
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -72,16 +73,109 @@ def _trim_text(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], True
 
 
-def manual_ls(state: AppState, manual_id: str | None = None) -> dict[str, Any]:
-    rows = list_manual_files(state.config.manuals_root, manual_id=manual_id)
-    grouped: dict[str, list[str]] = {}
-    for row in rows:
-        grouped.setdefault(row.manual_id, []).append(row.path)
-    items = [
-        {"manual_id": mid, "paths": sorted(paths)}
-        for mid, paths in sorted(grouped.items(), key=lambda x: x[0])
-    ]
-    return {"items": items}
+def _encode_node_segment(value: str) -> str:
+    raw = value.encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_node_segment(value: str) -> str:
+    padded = value + ("=" * ((4 - (len(value) % 4)) % 4))
+    try:
+        return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except Exception:
+        raise ToolError("invalid_parameter", "invalid id")
+
+
+def _manual_root_id(manual_id: str) -> str:
+    return f"manual::{manual_id}"
+
+
+def _manual_dir_id(manual_id: str, relative_dir: str) -> str:
+    return f"dir::{manual_id}::{_encode_node_segment(relative_dir)}"
+
+
+def _manual_file_id(manual_id: str, relative_path: str) -> str:
+    return f"file::{manual_id}::{_encode_node_segment(relative_path)}"
+
+
+def _parse_manual_ls_id(id_value: str) -> tuple[str, str, str | None]:
+    if id_value == "manuals":
+        return "manuals", "", None
+    if id_value.startswith("manual::"):
+        manual_id = id_value[len("manual::") :]
+        ensure(bool(manual_id), "invalid_parameter", "invalid id")
+        return "manual", manual_id, ""
+    if id_value.startswith("dir::"):
+        parts = id_value.split("::", 2)
+        ensure(len(parts) == 3, "invalid_parameter", "invalid id")
+        head, manual_id, encoded = parts
+        ensure(head == "dir" and bool(manual_id) and bool(encoded), "invalid_parameter", "invalid id")
+        relative_dir = _decode_node_segment(encoded)
+        return "dir", manual_id, normalize_relative_path(relative_dir)
+    if id_value.startswith("file::"):
+        parts = id_value.split("::", 2)
+        ensure(len(parts) == 3, "invalid_parameter", "invalid id")
+        head, manual_id, encoded = parts
+        ensure(head == "file" and bool(manual_id) and bool(encoded), "invalid_parameter", "invalid id")
+        relative_path = _decode_node_segment(encoded)
+        return "file", manual_id, normalize_relative_path(relative_path)
+    raise ToolError("invalid_parameter", "invalid id")
+
+
+def manual_ls(state: AppState, id: str | None = None) -> dict[str, Any]:
+    applied_id = id or "manuals"
+    node_kind, manual_id, relative = _parse_manual_ls_id(applied_id)
+
+    if node_kind == "manuals":
+        manual_ids = discover_manual_ids(state.config.manuals_root)
+        return {
+            "id": "manuals",
+            "items": [
+                {"id": _manual_root_id(mid), "name": mid, "kind": "dir"}
+                for mid in manual_ids
+            ],
+        }
+
+    ensure(_manual_exists(state.config.manuals_root, manual_id), "not_found", "manual_id not found", {"manual_id": manual_id})
+    manual_root = state.config.manuals_root / manual_id
+
+    if node_kind == "file":
+        raise ToolError("invalid_parameter", "file id cannot be expanded")
+
+    base_dir = manual_root if not relative else resolve_inside_root(manual_root, relative, must_exist=True)
+    ensure(base_dir.is_dir(), "not_found", "directory not found")
+
+    items: list[dict[str, Any]] = []
+    for child in sorted(base_dir.iterdir(), key=lambda p: p.name):
+        if child.is_symlink():
+            continue
+        child_name = child.name
+        child_rel = child_name if not relative else f"{relative}/{child_name}"
+        if child.is_dir():
+            items.append(
+                {
+                    "id": _manual_dir_id(manual_id, child_rel),
+                    "name": child_name,
+                    "kind": "dir",
+                }
+            )
+            continue
+        if not child.is_file():
+            continue
+        suffix = child.suffix.casefold()
+        if suffix not in {".md", ".json"}:
+            continue
+        items.append(
+            {
+                "id": _manual_file_id(manual_id, child_rel),
+                "name": child_name,
+                "kind": "file",
+                "path": child_rel,
+                "file_type": suffix[1:],
+            }
+        )
+
+    return {"id": applied_id, "items": items}
 
 
 def _manual_exists(root: Path, manual_id: str) -> bool:
