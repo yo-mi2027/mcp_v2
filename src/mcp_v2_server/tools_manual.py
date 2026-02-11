@@ -10,7 +10,6 @@ from .errors import ToolError, ensure
 from .manual_index import (
     MdNode,
     discover_manual_ids,
-    json_line_count,
     list_manual_files,
     parse_markdown_toc,
 )
@@ -47,6 +46,26 @@ FACET_HINTS = {
 }
 
 
+def _parse_int_param(
+    value: Any,
+    *,
+    name: str,
+    default: int,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    raw = default if value is None else value
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        raise ToolError("invalid_parameter", f"{name} must be an integer")
+    if min_value is not None and parsed < min_value:
+        raise ToolError("invalid_parameter", f"{name} must be >= {min_value}")
+    if max_value is not None and parsed > max_value:
+        raise ToolError("invalid_parameter", f"{name} must be <= {max_value}")
+    return parsed
+
+
 def _trim_text(text: str, max_chars: int) -> tuple[str, bool]:
     if len(text) <= max_chars:
         return text, False
@@ -55,12 +74,14 @@ def _trim_text(text: str, max_chars: int) -> tuple[str, bool]:
 
 def manual_ls(state: AppState, manual_id: str | None = None) -> dict[str, Any]:
     rows = list_manual_files(state.config.manuals_root, manual_id=manual_id)
-    return {
-        "items": [
-            {"manual_id": row.manual_id, "path": row.path, "file_type": row.file_type}
-            for row in rows
-        ]
-    }
+    grouped: dict[str, list[str]] = {}
+    for row in rows:
+        grouped.setdefault(row.manual_id, []).append(row.path)
+    items = [
+        {"manual_id": mid, "paths": sorted(paths)}
+        for mid, paths in sorted(grouped.items(), key=lambda x: x[0])
+    ]
+    return {"items": items}
 
 
 def _manual_exists(root: Path, manual_id: str) -> bool:
@@ -74,34 +95,14 @@ def manual_toc(state: AppState, manual_id: str) -> dict[str, Any]:
     for row in files:
         file_path = resolve_inside_root(state.config.manuals_root / manual_id, row.path, must_exist=True)
         text = file_path.read_text(encoding="utf-8")
+        headings: list[dict[str, Any]] = []
         if row.file_type == "md":
             for node in parse_markdown_toc(row.path, text):
-                items.append(
-                    {
-                        "kind": node.kind,
-                        "node_id": node.node_id,
-                        "path": node.path,
-                        "title": node.title,
-                        "level": node.level,
-                        "parent_id": node.parent_id,
-                        "line_start": node.line_start,
-                        "line_end": node.line_end,
-                    }
-                )
+                headings.append({"title": node.title, "line_start": node.line_start})
         else:
-            items.append(
-                {
-                    "kind": "json_file",
-                    "node_id": f"{row.path}#file",
-                    "path": row.path,
-                    "title": Path(row.path).name,
-                    "level": 1,
-                    "parent_id": None,
-                    "line_start": 1,
-                    "line_end": json_line_count(text),
-                }
-            )
-    items.sort(key=lambda x: (x["path"], x["line_start"]))
+            headings.append({"title": Path(row.path).name, "line_start": 1})
+        items.append({"path": row.path, "headings": headings})
+    items.sort(key=lambda x: x["path"])
     return {"items": items}
 
 
@@ -116,15 +117,20 @@ def _find_md_node(nodes: list[MdNode], start_line: int | None) -> MdNode:
 
 def _resolve_read_limits(state: AppState, limits: dict[str, Any] | None) -> tuple[int, int]:
     limits = limits or {}
-    max_sections = int(limits.get("max_sections") or 20)
-    max_chars = int(limits.get("max_chars") or 8000)
+    max_sections = _parse_int_param(limits.get("max_sections"), name="limits.max_sections", default=20, min_value=1)
+    max_chars = _parse_int_param(limits.get("max_chars"), name="limits.max_chars", default=8000, min_value=1)
     max_sections = min(max_sections, state.config.hard_max_sections)
     max_chars = min(max_chars, state.config.hard_max_chars)
     return max_sections, max_chars
 
 
 def _resolve_scan_max_chars(state: AppState, limits: dict[str, Any] | None) -> int:
-    max_chars = int((limits or {}).get("max_chars") or state.config.hard_max_chars)
+    max_chars = _parse_int_param(
+        (limits or {}).get("max_chars"),
+        name="limits.max_chars",
+        default=state.config.hard_max_chars,
+        min_value=1,
+    )
     return min(max_chars, state.config.hard_max_chars)
 
 
@@ -150,13 +156,14 @@ def manual_read(
 
     suffix = full_path.suffix.casefold()
     text = full_path.read_text(encoding="utf-8")
-    default_scope = "file" if suffix == ".json" else "snippet"
+    default_scope = "file" if suffix == ".json" else "section"
     applied_scope = scope or default_scope
     ensure(applied_scope in {"snippet", "section", "sections", "file"}, "invalid_parameter", "invalid scope")
     max_sections, max_chars = _resolve_read_limits(state, limits)
     allow_file = bool((limits or {}).get("allow_file"))
     truncated = False
     output = ""
+    applied_mode = "read"
 
     if suffix == ".json":
         if applied_scope in {"section", "sections"}:
@@ -173,7 +180,48 @@ def manual_read(
                 raise ToolError("forbidden", "md file scope requires ALLOW_FILE_SCOPE=true and limits.allow_file=true")
             output = text
         elif applied_scope == "section":
-            output = "\n".join(lines[target.line_start - 1 : target.line_end])
+            key = f"{manual_id}:{relative_path}"
+            section_start = target.line_start
+            section_end = target.line_end
+            progress = state.read_progress.get(key)
+            overlap = bool(
+                progress
+                and progress.get("last_section_start") is not None
+                and progress.get("last_section_end") is not None
+                and not (
+                    section_end < int(progress["last_section_start"] or 1)
+                    or section_start > int(progress["last_section_end"] or 1)
+                )
+            )
+            if overlap:
+                fallback_start = int(progress.get("next_scan_start") or (section_end + 1))
+                if fallback_start <= len(lines):
+                    scan = manual_scan(
+                        state,
+                        manual_id=manual_id,
+                        path=relative_path,
+                        start_line=fallback_start,
+                        chunk_lines=state.config.vault_scan_default_chunk_lines,
+                        limits={"max_chars": max_chars},
+                    )
+                    output = str(scan.get("text") or "")
+                    truncated = bool(scan.get("truncated"))
+                    applied_mode = "scan_fallback"
+                    next_scan_start = ((scan.get("next_cursor") or {}).get("start_line")) or (len(lines) + 1)
+                    state.read_progress[key] = {
+                        "last_section_start": section_start,
+                        "last_section_end": section_end,
+                        "next_scan_start": int(next_scan_start),
+                    }
+                else:
+                    output = "\n".join(lines[target.line_start - 1 : target.line_end])
+            else:
+                output = "\n".join(lines[target.line_start - 1 : target.line_end])
+                state.read_progress[key] = {
+                    "last_section_start": section_start,
+                    "last_section_end": section_end,
+                    "next_scan_start": section_end + 1,
+                }
         elif applied_scope == "sections":
             selected: list[str] = []
             start_idx = next((i for i, n in enumerate(nodes) if n.node_id == target.node_id), 0)
@@ -182,12 +230,22 @@ def manual_read(
             output = "\n\n".join(selected)
         else:
             # snippet
-            line_no = int(ref.get("start_line") or 1)
+            line_no = _parse_int_param(ref.get("start_line"), name="ref.start_line", default=1, min_value=1)
             before_chars = 240
             after_chars = 240
             if expand:
-                before_chars = max(0, int(expand.get("before_chars") or before_chars))
-                after_chars = max(0, int(expand.get("after_chars") or after_chars))
+                before_chars = _parse_int_param(
+                    expand.get("before_chars"),
+                    name="expand.before_chars",
+                    default=before_chars,
+                    min_value=0,
+                )
+                after_chars = _parse_int_param(
+                    expand.get("after_chars"),
+                    name="expand.after_chars",
+                    default=after_chars,
+                    min_value=0,
+                )
             line_no = min(max(1, line_no), max(1, len(lines)))
             char_cursor = 0
             for i, line in enumerate(lines, start=1):
@@ -199,7 +257,8 @@ def manual_read(
             output = text[start_char:end_char]
             applied_scope = "snippet"
 
-        output, truncated = _trim_text(output, max_chars)
+        if applied_mode == "read":
+            output, truncated = _trim_text(output, max_chars)
 
     return {
         "text": output,
@@ -208,6 +267,7 @@ def manual_read(
             "scope": applied_scope,
             "max_sections": max_sections if applied_scope in {"sections", "file"} else None,
             "max_chars": max_chars,
+            "mode": applied_mode,
         },
     }
 
@@ -216,6 +276,7 @@ def manual_scan(
     state: AppState,
     manual_id: str,
     path: str,
+    start_line: int | None = None,
     cursor: dict[str, Any] | None = None,
     chunk_lines: int | None = None,
     limits: dict[str, Any] | None = None,
@@ -229,17 +290,28 @@ def manual_scan(
     lines = text.splitlines()
     total = max(1, len(lines))
 
-    start_line = int((cursor or {}).get("start_line") or 1)
-    applied_chunk = int(chunk_lines or state.config.vault_scan_default_chunk_lines)
+    applied_start_line = _parse_int_param(
+        start_line if start_line is not None else (cursor or {}).get("start_line"),
+        name="start_line",
+        default=1,
+        min_value=1,
+    )
+    applied_chunk = _parse_int_param(
+        chunk_lines,
+        name="chunk_lines",
+        default=state.config.vault_scan_default_chunk_lines,
+        min_value=1,
+        max_value=state.config.vault_scan_max_chunk_lines,
+    )
     ensure(
         1 <= applied_chunk <= state.config.vault_scan_max_chunk_lines,
         "invalid_parameter",
         "chunk_lines out of range",
     )
-    ensure(1 <= start_line <= total, "invalid_parameter", "cursor.start_line out of range")
+    ensure(1 <= applied_start_line <= total, "invalid_parameter", "start_line out of range")
 
-    end_line = min(total, start_line + applied_chunk - 1)
-    chunk_text = "\n".join(lines[start_line - 1 : end_line])
+    end_line = min(total, applied_start_line + applied_chunk - 1)
+    chunk_text = "\n".join(lines[applied_start_line - 1 : end_line])
     max_chars = _resolve_scan_max_chars(state, limits)
 
     truncated_reason = "none"
@@ -254,19 +326,12 @@ def manual_scan(
         "manual_id": manual_id,
         "path": relative_path,
         "text": chunk_text,
-        "applied_range": {"start_line": start_line, "end_line": end_line},
+        "applied_range": {"start_line": applied_start_line, "end_line": end_line},
         "next_cursor": {"start_line": None if eof else end_line + 1},
         "eof": eof,
         "truncated": truncated_reason != "none",
         "truncated_reason": truncated_reason,
         "applied": {"chunk_lines": applied_chunk, "max_chars": max_chars},
-        "next_actions": [
-            {
-                "type": "stop" if eof else "manual_scan",
-                "confidence": 0.9 if eof else 0.8,
-                "params": None if eof else {"manual_id": manual_id, "path": relative_path, "cursor": {"start_line": end_line + 1}, "chunk_lines": applied_chunk},
-            }
-        ],
     }
 
 
@@ -444,15 +509,9 @@ def _build_summary(
     candidates: list[dict[str, Any]],
     scanned_files: int,
     scanned_nodes: int,
-    warnings: int,
-    max_stage: int,
-    scope_expanded: bool,
-    cutoff_reason: str | None,
-    unscanned_count: int,
     intent: str | None,
     candidate_low_threshold: int,
     file_bias_threshold: float,
-    escalation_reasons: list[str],
 ) -> dict[str, Any]:
     signal_counts = Counter()
     file_counts = Counter()
@@ -467,7 +526,6 @@ def _build_summary(
     edges = claim_graph.get("edges", [])
     conflicted_claim_count = sum(1 for c in claims if c.get("status") == "conflicted")
     unresolved_claim_count = sum(1 for c in claims if c.get("status") == "unresolved")
-    supported_claim_count = sum(1 for c in claims if c.get("status") == "supported")
     contradict_claim_count = len({e.get("from_claim_id") for e in edges if e.get("relation") == "contradicts"})
     followup_claim_count = len({e.get("from_claim_id") for e in edges if e.get("relation") == "requires_followup"})
 
@@ -491,32 +549,11 @@ def _build_summary(
         "scanned_files": scanned_files,
         "scanned_nodes": scanned_nodes,
         "candidates": total,
-        "warnings": warnings,
-        "max_stage_applied": max_stage,
-        "scope_expanded": scope_expanded,
-        "unscanned_sections_count": unscanned_count,
-        "integrated_candidates": total,
-        "integrated_nodes": total,
-        "signal_coverage": {
-            "heading": signal_counts.get("heading", 0),
-            "normalized": signal_counts.get("normalized", 0),
-            "loose": signal_counts.get("loose", 0),
-            "exceptions": signal_counts.get("exceptions", 0),
-        },
         "file_bias_ratio": round(file_bias, 4),
         "conflict_count": conflict_count,
         "gap_count": gap_count,
-        "claim_count": len(claims),
-        "supported_claim_count": supported_claim_count,
-        "conflicted_claim_count": conflicted_claim_count,
-        "unresolved_claim_count": unresolved_claim_count,
-        "sufficiency_score": round(sufficiency_score, 4),
         "integration_status": status,
     }
-    if cutoff_reason:
-        summary["cutoff_reason"] = cutoff_reason
-    if escalation_reasons:
-        summary["escalation_reasons"] = escalation_reasons
     return summary
 
 
@@ -587,22 +624,41 @@ def _run_find_pass(
         for synonym in SYNONYMS.get(term, []):
             expanded_terms.add(normalize_text(synonym))
 
+    files_by_manual: dict[str, list[Any]] = {}
     for manual_id in manual_ids:
         files = list_manual_files(state.config.manuals_root, manual_id=manual_id)
         if prioritize_paths and manual_id in prioritize_paths:
             preferred = prioritize_paths[manual_id]
             files.sort(key=lambda r: (r.path not in preferred, r.path))
-        for row in files:
-            if allowed_paths is not None and row.path not in allowed_paths.get(manual_id, set()):
-                continue
+        if allowed_paths is not None:
+            files = [row for row in files if row.path in allowed_paths.get(manual_id, set())]
+        files_by_manual[manual_id] = files
+
+    seen_unscanned: set[tuple[str, str]] = set()
+
+    def append_remaining_unscanned(start_manual_idx: int, start_file_idx: int, reason: str) -> None:
+        for mi in range(start_manual_idx, len(manual_ids)):
+            mid = manual_ids[mi]
+            rows = files_by_manual.get(mid, [])
+            from_idx = start_file_idx if mi == start_manual_idx else 0
+            for row in rows[from_idx:]:
+                key = (mid, row.path)
+                if key in seen_unscanned:
+                    continue
+                seen_unscanned.add(key)
+                unscanned_sections.append({"manual_id": mid, "path": row.path, "reason": reason})
+
+    for manual_idx, manual_id in enumerate(manual_ids):
+        files = files_by_manual.get(manual_id, [])
+        for row_idx, row in enumerate(files):
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if elapsed_ms > budget_time_ms:
                 cutoff_reason = "time_budget"
-                unscanned_sections.append({"manual_id": manual_id, "path": row.path, "reason": "time_budget"})
+                append_remaining_unscanned(manual_idx, row_idx, "time_budget")
                 break
             if len(candidates) >= max_candidates:
                 cutoff_reason = "candidate_cap"
-                unscanned_sections.append({"manual_id": manual_id, "path": row.path, "reason": "candidate_cap"})
+                append_remaining_unscanned(manual_idx, row_idx, "candidate_cap")
                 break
             scanned_files += 1
             full_path = resolve_inside_root(state.config.manuals_root / manual_id, row.path, must_exist=True)
@@ -717,19 +773,38 @@ def _run_exceptions_expand_pass(
     cutoff_reason: str | None = None
     unscanned_sections: list[dict[str, Any]] = []
 
+    files_by_manual: dict[str, list[Any]] = {}
     for manual_id in manual_ids:
         files = list_manual_files(state.config.manuals_root, manual_id=manual_id)
-        for row in files:
-            if allowed_paths is not None and row.path not in allowed_paths.get(manual_id, set()):
-                continue
+        if allowed_paths is not None:
+            files = [row for row in files if row.path in allowed_paths.get(manual_id, set())]
+        files_by_manual[manual_id] = files
+
+    seen_unscanned: set[tuple[str, str]] = set()
+
+    def append_remaining_unscanned(start_manual_idx: int, start_file_idx: int, reason: str) -> None:
+        for mi in range(start_manual_idx, len(manual_ids)):
+            mid = manual_ids[mi]
+            rows = files_by_manual.get(mid, [])
+            from_idx = start_file_idx if mi == start_manual_idx else 0
+            for row in rows[from_idx:]:
+                key = (mid, row.path)
+                if key in seen_unscanned:
+                    continue
+                seen_unscanned.add(key)
+                unscanned_sections.append({"manual_id": mid, "path": row.path, "reason": reason})
+
+    for manual_idx, manual_id in enumerate(manual_ids):
+        files = files_by_manual.get(manual_id, [])
+        for row_idx, row in enumerate(files):
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if elapsed_ms > budget_time_ms:
                 cutoff_reason = "time_budget"
-                unscanned_sections.append({"manual_id": manual_id, "path": row.path, "reason": "time_budget"})
+                append_remaining_unscanned(manual_idx, row_idx, "time_budget")
                 break
             if existing_count + len(candidates) >= max_candidates:
                 cutoff_reason = "candidate_cap"
-                unscanned_sections.append({"manual_id": manual_id, "path": row.path, "reason": "candidate_cap"})
+                append_remaining_unscanned(manual_idx, row_idx, "candidate_cap")
                 break
 
             scanned_files += 1
@@ -807,15 +882,21 @@ def manual_find(
     max_stage: int | None = None,
     only_unscanned_from_trace_id: str | None = None,
     budget: dict[str, Any] | None = None,
+    include_claim_graph: bool | None = None,
 ) -> dict[str, Any]:
     ensure(bool(query and query.strip()), "invalid_parameter", "query is required")
     ensure(intent in ALLOWED_INTENTS, "invalid_parameter", "invalid intent")
-    applied_max_stage = int(max_stage if max_stage is not None else state.config.default_max_stage)
+    applied_max_stage = _parse_int_param(max_stage, name="max_stage", default=state.config.default_max_stage)
     ensure(applied_max_stage in {3, 4}, "invalid_parameter", "max_stage must be 3 or 4")
 
     budget = budget or {}
-    budget_time_ms = int(budget.get("time_ms") or 60000)
-    max_candidates = int(budget.get("max_candidates") or 200)
+    budget_time_ms = _parse_int_param(budget.get("time_ms"), name="budget.time_ms", default=60000, min_value=1)
+    max_candidates = _parse_int_param(
+        budget.get("max_candidates"),
+        name="budget.max_candidates",
+        default=200,
+        min_value=1,
+    )
     candidate_low_threshold, file_bias_threshold = state.adaptive_stats.manual_find_thresholds(
         base_candidate_low=state.config.adaptive_candidate_low_base,
         base_file_bias=state.config.adaptive_file_bias_base,
@@ -844,7 +925,6 @@ def manual_find(
                 continue
             prioritize_paths.setdefault(m, set()).add(p)
         if prioritize_paths:
-            allowed_paths = {m: set(paths) for m, paths in prioritize_paths.items()}
             escalation_reasons.append("prioritized_unscanned_sections")
 
     candidates, scanned_files, scanned_nodes, warnings, cutoff_reason, unscanned = _run_find_pass(
@@ -1036,15 +1116,9 @@ def manual_find(
         candidates=candidates,
         scanned_files=scanned_files,
         scanned_nodes=scanned_nodes,
-        warnings=warnings,
-        max_stage=applied_max_stage,
-        scope_expanded=scope_expanded,
-        cutoff_reason=cutoff_reason,
-        unscanned_count=len(unscanned),
         intent=intent,
         candidate_low_threshold=candidate_low_threshold,
         file_bias_threshold=file_bias_threshold,
-        escalation_reasons=sorted(set(escalation_reasons)),
     )
     next_actions = _plan_next_actions(summary, query, intent, applied_max_stage)
     evidences_by_id = {item["evidence_id"]: item for item in claim_graph.get("evidences", [])}
@@ -1125,7 +1199,8 @@ def manual_find(
             {**item, "reason": "ranked_by_integration"}
             for item in candidates[:20]
         ],
-        "escalation_reasons": summary.get("escalation_reasons", []),
+        "escalation_reasons": sorted(set(escalation_reasons)),
+        "cutoff_reason": cutoff_reason,
     }
     trace_id = state.traces.create(trace_payload)
     chars_in = len(query)
@@ -1139,7 +1214,7 @@ def manual_find(
             "scanned_files": scanned_files,
             "candidates": len(candidates),
             "warnings": warnings,
-            "max_stage_applied": summary["max_stage_applied"],
+            "max_stage_applied": applied_max_stage,
             "scope_expanded": scope_expanded,
             "cutoff_reason": cutoff_reason,
             "unscanned_sections_count": len(unscanned),
@@ -1154,7 +1229,10 @@ def manual_find(
         }
     )
 
-    return {"trace_id": trace_id, "claim_graph": claim_graph, "summary": summary, "next_actions": next_actions}
+    out: dict[str, Any] = {"trace_id": trace_id, "summary": summary, "next_actions": next_actions}
+    if bool(include_claim_graph):
+        out["claim_graph"] = claim_graph
+    return out
 
 
 def manual_hits(
@@ -1174,8 +1252,8 @@ def manual_hits(
         "invalid_parameter",
         "invalid kind",
     )
-    applied_offset = max(0, int(offset or 0))
-    applied_limit = max(1, int(limit or 50))
+    applied_offset = _parse_int_param(offset, name="offset", default=0, min_value=0)
+    applied_limit = _parse_int_param(limit, name="limit", default=50, min_value=1)
 
     key_map = {
         "candidates": "candidates",
@@ -1193,8 +1271,46 @@ def manual_hits(
         rows = (payload.get(parent) or {}).get(child, [])
     else:
         rows = payload.get(mapped_key, [])
+    shared_manual_id: str | None = None
+    if applied_kind == "candidates":
+        manual_ids = {
+            str(((item.get("ref") or {}).get("manual_id")))
+            for item in rows
+            if (item.get("ref") or {}).get("manual_id")
+        }
+        shared_manual_id = next(iter(manual_ids)) if len(manual_ids) == 1 else None
+        compact_rows: list[dict[str, Any]] = []
+        for item in rows:
+            ref = dict(item.get("ref") or {})
+            compact_ref: dict[str, Any] = {}
+            if not shared_manual_id and ref.get("manual_id"):
+                compact_ref["manual_id"] = ref["manual_id"]
+            if ref.get("path"):
+                compact_ref["path"] = ref["path"]
+            if ref.get("start_line") is not None:
+                compact_ref["start_line"] = ref["start_line"]
+            if ref.get("title"):
+                compact_ref["title"] = ref["title"]
+            if ref.get("signals"):
+                compact_ref["signals"] = ref["signals"]
+
+            compact_item: dict[str, Any] = {"ref": compact_ref}
+            score = item.get("score")
+            if score is not None:
+                compact_item["score"] = score
+            reason = item.get("reason")
+            if reason is not None:
+                compact_item["reason"] = reason
+            conflict_with = item.get("conflict_with") or []
+            if conflict_with:
+                compact_item["conflict_with"] = conflict_with
+            gap_hint = item.get("gap_hint")
+            if gap_hint is not None:
+                compact_item["gap_hint"] = gap_hint
+            compact_rows.append(compact_item)
+        rows = compact_rows
     sliced = rows[applied_offset : applied_offset + applied_limit]
-    return {
+    out = {
         "trace_id": trace_id,
         "kind": applied_kind,
         "offset": applied_offset,
@@ -1202,3 +1318,6 @@ def manual_hits(
         "total": len(rows),
         "items": sliced,
     }
+    if applied_kind == "candidates" and shared_manual_id:
+        out["manual_id"] = shared_manual_id
+    return out

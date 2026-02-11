@@ -1,5 +1,7 @@
 # 統合MCPサーバ v2 Vault仕様（現行）
 
+最終更新: 2026-02-11
+
 ## 1. Tool Catalog
 
 - `vault_create({ path, content })`
@@ -55,8 +57,10 @@ Input:
 
 - 既定 `full=false`
 - `full=false` のとき `range` 必須
-- `limits.max_chars` は `HARD_MAX_CHARS` で上限制限
-- 常に `next_actions` で `vault_replace` を提案
+- `range.start_line` / `range.end_line` は整数かつ `>= 1`
+- `range.start_line <= range.end_line`
+- `range.start_line` は対象ファイルの総行数範囲内
+- `limits.max_chars` は整数かつ `>= 1`、`HARD_MAX_CHARS` で上限制限
 
 Output:
 
@@ -72,16 +76,7 @@ Output:
   "next_offset": {
     "start_line": "number | null"
   },
-  "truncated_reason": "none|range_end|max_chars|hard_limit",
-  "next_actions": [
-    {
-      "type": "vault_replace",
-      "confidence": "number",
-      "params": {
-        "path": "string"
-      }
-    }
-  ]
+  "truncated_reason": "none|range_end|max_chars|hard_limit"
 }
 ```
 
@@ -105,9 +100,10 @@ Input:
 固定ルール:
 
 - `cursor.start_line` 既定: `1`
+- `cursor.start_line` は整数かつ対象ファイルの総行数範囲内
 - `chunk_lines` 既定: `VAULT_SCAN_DEFAULT_CHUNK_LINES`
-- `chunk_lines` 許容: `1..VAULT_SCAN_MAX_CHUNK_LINES`
-- `limits.max_chars` は `HARD_MAX_CHARS` で上限制限
+- `chunk_lines` は整数かつ `1..VAULT_SCAN_MAX_CHUNK_LINES`
+- `limits.max_chars` は整数かつ `>= 1`、`HARD_MAX_CHARS` で上限制限
 
 Output:
 
@@ -123,14 +119,7 @@ Output:
   },
   "eof": "boolean",
   "truncated": "boolean",
-  "truncated_reason": "none|chunk_end|max_chars|hard_limit",
-  "next_actions": [
-    {
-      "type": "vault_scan|stop",
-      "confidence": "number",
-      "params": "object | null"
-    }
-  ]
+  "truncated_reason": "none|chunk_end|max_chars|hard_limit"
 }
 ```
 
@@ -152,6 +141,7 @@ Input:
 - `.system/` 配下は `forbidden`
 - `daily/` 配下は `forbidden`
 - `max_replacements` 未指定は `1`
+- `max_replacements` は整数かつ `>= 0`
 
 Output:
 

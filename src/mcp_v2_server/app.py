@@ -21,21 +21,10 @@ from .tools_vault import (
 
 try:
     from fastmcp import FastMCP
-except Exception:
-    class FastMCP:  # type: ignore[override]
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self._tools: dict[str, Callable[..., Any]] = {}
-
-        def tool(self, *args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-            def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-                self._tools[func.__name__] = func
-                return func
-
-            return decorator
-
-        def run(self, *args: Any, **kwargs: Any) -> None:
-            return None
+except Exception as e:  # pragma: no cover - import guard for runtime setup
+    raise RuntimeError(
+        "fastmcp is required to run mcp_v2_server. Install dependencies with: pip install -r requirements.txt"
+    ) from e
 
 
 def _execute(state: AppState, tool: str, fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -48,22 +37,12 @@ def _execute(state: AppState, tool: str, fn: Callable[..., dict[str, Any]], *arg
                 fields["trace_id"] = out.get("trace_id")
                 summary = out.get("summary") or {}
                 for key in (
+                    "scanned_files",
+                    "scanned_nodes",
                     "candidates",
-                    "warnings",
-                    "max_stage_applied",
-                    "scope_expanded",
-                    "cutoff_reason",
-                    "escalation_reasons",
-                    "unscanned_sections_count",
-                    "integrated_candidates",
                     "file_bias_ratio",
                     "conflict_count",
                     "gap_count",
-                    "claim_count",
-                    "supported_claim_count",
-                    "conflicted_claim_count",
-                    "unresolved_claim_count",
-                    "sufficiency_score",
                     "integration_status",
                 ):
                     if key in summary:
@@ -119,6 +98,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
         max_stage: int | None = None,
         only_unscanned_from_trace_id: str | None = None,
         budget: dict[str, Any] | None = None,
+        include_claim_graph: bool | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -131,6 +111,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 max_stage=max_stage,
                 only_unscanned_from_trace_id=only_unscanned_from_trace_id,
                 budget=budget,
+                include_claim_graph=include_claim_graph,
             ),
         )
 
@@ -151,6 +132,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
     def manual_scan(
         manual_id: str,
         path: str,
+        start_line: int | None = None,
         cursor: dict[str, Any] | None = None,
         chunk_lines: int | None = None,
         limits: dict[str, Any] | None = None,
@@ -162,6 +144,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 app_state,
                 manual_id=manual_id,
                 path=path,
+                start_line=start_line,
                 cursor=cursor,
                 chunk_lines=chunk_lines,
                 limits=limits,

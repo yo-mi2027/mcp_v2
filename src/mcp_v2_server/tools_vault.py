@@ -14,15 +14,40 @@ from .path_guard import (
 from .state import AppState
 
 
+def _parse_int_param(
+    value: Any,
+    *,
+    name: str,
+    default: int,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    raw = default if value is None else value
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        raise ToolError("invalid_parameter", f"{name} must be an integer")
+    if min_value is not None and parsed < min_value:
+        raise ToolError("invalid_parameter", f"{name} must be >= {min_value}")
+    if max_value is not None and parsed > max_value:
+        raise ToolError("invalid_parameter", f"{name} must be <= {max_value}")
+    return parsed
+
+
 def _resolve_max_chars(state: AppState, limits: dict[str, Any] | None) -> int:
-    max_chars = int((limits or {}).get("max_chars") or state.config.hard_max_chars)
+    max_chars = _parse_int_param(
+        (limits or {}).get("max_chars"),
+        name="limits.max_chars",
+        default=state.config.hard_max_chars,
+        min_value=1,
+    )
     return min(max_chars, state.config.hard_max_chars)
 
 
 def _range_from_lines(total: int, range_obj: dict[str, Any] | None) -> tuple[int, int]:
     ensure(range_obj is not None, "invalid_parameter", "range is required when full=false")
-    start = int(range_obj.get("start_line") or 1)
-    end = int(range_obj.get("end_line") or total)
+    start = _parse_int_param(range_obj.get("start_line"), name="range.start_line", default=1, min_value=1)
+    end = _parse_int_param(range_obj.get("end_line"), name="range.end_line", default=total, min_value=1)
     ensure(start >= 1 and end >= start, "invalid_parameter", "invalid range")
     ensure(start <= total, "invalid_parameter", "range.start_line out of range")
     return start, min(end, total)
@@ -65,13 +90,6 @@ def vault_read(
         "applied_range": {"start_line": start_line, "end_line": end_line},
         "next_offset": {"start_line": None if end_line >= total else end_line + 1},
         "truncated_reason": truncated_reason,
-        "next_actions": [
-            {
-                "type": "vault_replace",
-                "confidence": 0.8,
-                "params": {"path": normalized},
-            }
-        ],
     }
 
 
@@ -107,8 +125,7 @@ def vault_replace(state: AppState, path: str, find: str, replace: str, max_repla
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     ensure(target.is_file(), "not_found", "target is not a file", {"path": normalized})
     data = target.read_text(encoding="utf-8")
-    max_count = int(max_replacements or 1)
-    ensure(max_count >= 0, "invalid_parameter", "max_replacements must be >= 0")
+    max_count = _parse_int_param(max_replacements, name="max_replacements", default=1, min_value=0)
     total_hits = data.count(find)
     count = min(total_hits, max_count)
     new_data = data.replace(find, replace, max_count)
@@ -129,8 +146,14 @@ def vault_scan(
     lines = text.splitlines()
     total = max(1, len(lines))
 
-    start_line = int((cursor or {}).get("start_line") or 1)
-    applied_chunk = int(chunk_lines or state.config.vault_scan_default_chunk_lines)
+    start_line = _parse_int_param((cursor or {}).get("start_line"), name="cursor.start_line", default=1, min_value=1)
+    applied_chunk = _parse_int_param(
+        chunk_lines,
+        name="chunk_lines",
+        default=state.config.vault_scan_default_chunk_lines,
+        min_value=1,
+        max_value=state.config.vault_scan_max_chunk_lines,
+    )
     ensure(
         1 <= applied_chunk <= state.config.vault_scan_max_chunk_lines,
         "invalid_parameter",
@@ -150,17 +173,6 @@ def vault_scan(
         truncated_reason = "chunk_end"
     eof = end_line >= total
 
-    if eof:
-        next_actions = [{"type": "stop", "confidence": 0.9, "params": None}]
-    else:
-        next_actions = [
-            {
-                "type": "vault_scan",
-                "confidence": 0.8,
-                "params": {"path": normalized, "cursor": {"start_line": end_line + 1}, "chunk_lines": applied_chunk},
-            }
-        ]
-
     return {
         "text": chunk_text,
         "applied_range": {"start_line": start_line, "end_line": end_line},
@@ -168,5 +180,4 @@ def vault_scan(
         "eof": eof,
         "truncated": truncated_reason != "none",
         "truncated_reason": truncated_reason,
-        "next_actions": next_actions,
     }

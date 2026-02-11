@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .adaptive_stats import AdaptiveStatsWriter
 from .config import Config
@@ -14,6 +14,7 @@ class AppState:
     logger: JsonlLogger
     traces: TraceStore
     adaptive_stats: AdaptiveStatsWriter
+    read_progress: dict[str, dict[str, int | None]] = field(default_factory=dict)
 
 
 def create_state(config: Config | None = None) -> AppState:

@@ -141,5 +141,4 @@ uv run pytest -q
 - `ALLOW_FILE_SCOPE` (default: `false`)
 - `HARD_MAX_SECTIONS` (default: `20`)
 - `HARD_MAX_CHARS` (default: `20000`)
-- `DEFAULT_MAX_STAGE` (default: `4`)
-- `HARD_MAX_STAGE` (default: `4`)
+- `DEFAULT_MAX_STAGE` (default: `4`, allowed: `3|4`)

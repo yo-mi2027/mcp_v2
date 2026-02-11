@@ -32,6 +32,18 @@ def test_vault_read_rejects_out_of_range_start_line(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
+def test_vault_read_rejects_non_integer_range_start_line(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_read(state, path="source.md", full=False, range={"start_line": "abc", "end_line": 2})
+    assert e.value.code == "invalid_parameter"
+
+
+def test_vault_read_rejects_negative_max_chars(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_read(state, path="source.md", full=False, range={"start_line": 1, "end_line": 2}, limits={"max_chars": -1})
+    assert e.value.code == "invalid_parameter"
+
+
 def test_daily_file_forbids_overwrite_and_replace(state) -> None:
     vault_create(state, path="daily/2026-02-06.md", content="first\n")
     with pytest.raises(ToolError) as e2:
@@ -57,10 +69,22 @@ def test_vault_create_requires_non_empty_content(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
-def test_vault_read_suggests_vault_replace(state) -> None:
+def test_vault_replace_rejects_non_integer_max_replacements(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_replace(state, path="source.md", find="line", replace="x", max_replacements="abc")
+    assert e.value.code == "invalid_parameter"
+
+
+def test_vault_scan_rejects_non_integer_cursor_start_line(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_scan(state, path="source.md", cursor={"start_line": "abc"})
+    assert e.value.code == "invalid_parameter"
+
+
+def test_vault_read_returns_offsets_without_next_actions(state) -> None:
     out = vault_read(state, path="source.md", full=False, range={"start_line": 1, "end_line": 2})
-    assert out["next_actions"][0]["type"] == "vault_replace"
-    assert out["next_actions"][0]["params"]["path"] == "source.md"
+    assert out["applied_range"]["start_line"] == 1
+    assert "next_actions" not in out
 
 
 def test_execute_logs_vault_extension_fields(state, capsys) -> None:

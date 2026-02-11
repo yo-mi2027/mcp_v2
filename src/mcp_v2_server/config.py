@@ -54,7 +54,6 @@ class Config:
     hard_max_sections: int
     hard_max_chars: int
     default_max_stage: int
-    hard_max_stage: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -62,6 +61,9 @@ class Config:
         manuals_root = Path(os.getenv("MANUALS_ROOT", str(workspace_root / "manuals"))).expanduser().resolve()
         vault_root = Path(os.getenv("VAULT_ROOT", str(workspace_root / "vault"))).expanduser().resolve()
         default_manual_id = os.getenv("DEFAULT_MANUAL_ID")
+        default_max_stage = _env_int("DEFAULT_MAX_STAGE", 4)
+        if default_max_stage not in {3, 4}:
+            raise ValueError("DEFAULT_MAX_STAGE must be 3 or 4")
 
         return cls(
             workspace_root=workspace_root,
@@ -85,6 +87,5 @@ class Config:
             allow_file_scope=_env_bool("ALLOW_FILE_SCOPE", False),
             hard_max_sections=_env_int("HARD_MAX_SECTIONS", 20),
             hard_max_chars=_env_int("HARD_MAX_CHARS", 20000),
-            default_max_stage=_env_int("DEFAULT_MAX_STAGE", 4),
-            hard_max_stage=_env_int("HARD_MAX_STAGE", 4),
+            default_max_stage=default_max_stage,
         )
