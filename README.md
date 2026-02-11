@@ -1,15 +1,61 @@
 # mcp_v2
 
-`mcp_v2` は、manual/vault/bridge/tooling 系ツールを統合した FastMCP サーバーです。
+`mcp_v2` は、manual と vault を扱う FastMCP サーバーです。  
+現行の公開ツールは次の10個です。
 
-## Requirements
+- `manual_ls`
+- `manual_toc`
+- `manual_find`
+- `manual_hits`
+- `manual_read`
+- `manual_scan`
+- `vault_create`
+- `vault_read`
+- `vault_scan`
+- `vault_replace`
 
-- Python `3.12.x` (必須: `>=3.12,<3.13`)
-- macOS / Linux / Windows (stdio 実行を想定)
+## 1. このREADMEでできること
 
-## Quick Start (pip)
+この手順だけで、初心者でも次を完了できます。
 
-macOS / Linux:
+1. Python 環境の準備
+2. 依存パッケージのインストール
+3. MCPサーバーの起動
+4. Codex などのMCPクライアント接続設定
+5. 動作確認
+
+## 2. 前提
+
+- Python `3.12.x`（必須: `>=3.12,<3.13`）
+- OS: macOS / Linux / Windows
+- ターミナルを使えること
+
+Pythonバージョン確認:
+
+```bash
+python --version
+```
+
+Windowsで `python` が 3.12 以外の場合:
+
+```powershell
+py -3.12 --version
+```
+
+## 3. プロジェクト取得
+
+GitHub から取得する場合:
+
+```bash
+git clone https://github.com/yo-mi2027/mcp_v2.git
+cd mcp_v2
+```
+
+すでに取得済みなら、`mcp_v2` ディレクトリへ移動してください。
+
+## 4. セットアップ（pip推奨）
+
+### macOS / Linux
 
 ```bash
 cd /path/to/mcp_v2
@@ -19,7 +65,7 @@ python -m pip install -U pip
 pip install -r requirements.txt
 ```
 
-Windows (PowerShell):
+### Windows (PowerShell)
 
 ```powershell
 cd C:\path\to\mcp_v2
@@ -29,40 +75,49 @@ python -m pip install -U pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` には `-e .` を含めているため、`mcp_v2_server` パッケージが editable install されます。
+補足:
 
-## Quick Start (uv)
+- `requirements.txt` には `-e .` を含むため、`mcp_v2_server` は editable install されます。
+
+## 5. セットアップ（uvを使う場合）
+
+`uv` を使う場合は次だけで準備できます。
 
 ```bash
 cd /path/to/mcp_v2
 uv sync
 ```
 
-## Run Server (stdio)
+## 6. サーバー起動（stdio）
 
-macOS / Linux:
+### macOS / Linux
 
 ```bash
 source .venv/bin/activate
 python -m mcp_v2_server.app --stdio
 ```
 
-Windows (PowerShell):
+### Windows (PowerShell)
 
 ```powershell
 .venv\Scripts\Activate.ps1
 python -m mcp_v2_server.app --stdio
 ```
 
-`uv` の場合:
+### uv の場合
 
 ```bash
 uv run python -m mcp_v2_server.app --stdio
 ```
 
-## MCP Client Config Example (Codex)
+`--stdio` で起動すると、MCPクライアントから接続されるまで待機します。  
+終了するには `Ctrl + C` を押してください。
 
-`config.toml` 例:
+## 7. Codex のMCP設定例
+
+`config.toml` に以下を追加します。
+
+### macOS / Linux
 
 ```toml
 [mcp_servers.mcp-v2]
@@ -70,7 +125,7 @@ command = "/absolute/path/to/mcp_v2/.venv/bin/python"
 args = ["-m", "mcp_v2_server.app", "--stdio"]
 ```
 
-Windows 例 (`'...'` は TOML literal string):
+### Windows
 
 ```toml
 [mcp_servers.mcp-v2]
@@ -78,50 +133,92 @@ command = 'C:\absolute\path\to\mcp_v2\.venv\Scripts\python.exe'
 args = ["-m", "mcp_v2_server.app", "--stdio"]
 ```
 
-注意:
-- Python が 3.12 以外（例: 3.14）の venv だと起動前に失敗します。
-- もし import エラーが出る場合は `pip install -r requirements.txt` を再実行してください。
+## 8. はじめての動作確認
 
-## Directory Layout
+MCPクライアントから次を順に呼び出してください。
 
-- `manuals/<manual_id>/`
-- `vault/`
-- `src/mcp_v2_server/` (実装本体)
-- `docs/` (仕様・要件)
+1. `manual_ls`
+2. `manual_toc`（`manual_id` を指定）
+3. `manual_find`（`query` を指定）
+4. `manual_hits`（`trace_id` を指定）
 
-## Test
+これで「一覧 -> 検索 -> 詳細取得」の一連動作を確認できます。
 
-macOS / Linux:
+## 9. よくあるエラーと対処
+
+### 1) Pythonバージョン不一致
+
+症状:
+
+- 起動時に依存関係や互換性エラーが出る
+
+対処:
+
+- Python 3.12 で venv を作り直してください。
+
+### 2) `ModuleNotFoundError` / import エラー
+
+対処:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 3) クライアントから接続できない
+
+確認ポイント:
+
+- `command` が実在する Python 実行ファイルを指しているか
+- `args` が `-m mcp_v2_server.app --stdio` になっているか
+- クライアント再起動後に反映されるか
+
+## 10. テスト実行
+
+### macOS / Linux
 
 ```bash
 source .venv/bin/activate
 pytest -q
 ```
 
-Windows (PowerShell):
+### Windows (PowerShell)
 
 ```powershell
 .venv\Scripts\Activate.ps1
 pytest -q
 ```
 
-`uv` の場合:
+### uv
 
 ```bash
 uv run pytest -q
 ```
 
-## Main Docs
+## 11. ディレクトリ構成
 
-- `docs/requirements.md`
-- `docs/spec_v2.md`
-- `docs/spec_manuals.md`
-- `docs/spec_vault.md`
-- `docs/spec_bridge.md`
-- `docs/spec_tooling.md`
-- `docs/rag_design_v2.md`
+- `manuals/<manual_id>/`
+- `vault/`
+- `src/mcp_v2_server/`（実装本体）
+- `docs/`（仕様・要件）
+- `tests/`
 
-## Environment Variables
+## 12. 主なドキュメント
+
+- `docs/spec_v2.md`（共通仕様）
+- `docs/spec_manuals.md`（manual系仕様）
+- `docs/spec_vault.md`（vault系仕様）
+- `docs/requirements.md`（要件）
+- `docs/rag_design_v2.md`（探索設計メモ）
+
+## 13. 環境変数
 
 - `WORKSPACE_ROOT` (default: `.`)
 - `MANUALS_ROOT` (default: `${WORKSPACE_ROOT}/manuals`)
