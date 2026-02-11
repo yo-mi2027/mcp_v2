@@ -1,10 +1,8 @@
 # Shared data policy
-# manuals: share only top-level category directories (one level under manuals/)
+# manuals: share only the manuals/ folder marker
 manuals/**
 !manuals/
-!manuals/*/
-manuals/*/**
-!manuals/*/.gitkeep
+!manuals/.gitkeep
 
 # vault: share top-level entries and all files under .system/
 vault/**
