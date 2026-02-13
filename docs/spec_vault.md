@@ -5,8 +5,8 @@
 ## 1. Tool Catalog
 
 - `vault_create({ path, content })`
-- `vault_read({ path, full?, range?, limits? })`
-- `vault_scan({ path, start_line?, cursor?, chunk_lines?, limits? })`
+- `vault_read({ path, full?, range? })`
+- `vault_scan({ path, start_line?, cursor? })`
 - `vault_replace({ path, find, replace, max_replacements? })`
 
 ## 2. `vault_create`
@@ -46,9 +46,6 @@ Input:
   "range": {
     "start_line": "number | null",
     "end_line": "number | null"
-  },
-  "limits": {
-    "max_chars": "number | null"
   }
 }
 ```
@@ -56,11 +53,12 @@ Input:
 固定ルール:
 
 - 既定 `full=false`
+- `full` は boolean のみ許可（非booleanは `invalid_parameter`）
 - `full=false` のとき `range` 必須
 - `range.start_line` / `range.end_line` は整数かつ `>= 1`
 - `range.start_line <= range.end_line`
 - `range.start_line` は対象ファイルの総行数範囲内
-- `limits.max_chars` は整数かつ `>= 1`、`HARD_MAX_CHARS` で上限制限
+- `max_chars` は固定値 `12000` で、入力から変更不可
 
 Output:
 
@@ -74,9 +72,9 @@ Output:
     "end_line": "number"
   },
   "next_cursor": {
-    "start_line": "number | null"
+    "char_offset": "number | null"
   },
-  "truncated_reason": "none|range_end|max_chars|hard_limit",
+  "truncated_reason": "none|range_end|max_chars",
   "applied": {
     "full": "boolean",
     "max_chars": "number"
@@ -93,11 +91,8 @@ Input:
   "path": "string",
   "start_line": "number | null",
   "cursor": {
-    "start_line": "number | null"
-  },
-  "chunk_lines": "number | null",
-  "limits": {
-    "max_chars": "number | null"
+    "start_line": "number | null",
+    "char_offset": "number | null"
   }
 }
 ```
@@ -106,9 +101,7 @@ Input:
 
 - `start_line` 指定時はそれを優先し、未指定時は `cursor.start_line`（未指定なら1）を使う
 - `start_line`（または `cursor.start_line`）は整数かつ対象ファイルの総行数範囲内
-- `chunk_lines` 既定: `VAULT_SCAN_DEFAULT_CHUNK_LINES`
-- `chunk_lines` は整数かつ `1..VAULT_SCAN_MAX_CHUNK_LINES`
-- `limits.max_chars` は整数かつ `>= 1`、`HARD_MAX_CHARS` で上限制限
+- `max_chars` は固定値 `12000`（`SCAN_MAX_CHARS`）で、入力から変更不可
 
 Output:
 
@@ -120,13 +113,12 @@ Output:
     "end_line": "number"
   },
   "next_cursor": {
-    "start_line": "number | null"
+    "char_offset": "number | null"
   },
   "eof": "boolean",
   "truncated": "boolean",
-  "truncated_reason": "none|chunk_end|max_chars|hard_limit",
+  "truncated_reason": "none|max_chars",
   "applied": {
-    "chunk_lines": "number",
     "max_chars": "number"
   }
 }

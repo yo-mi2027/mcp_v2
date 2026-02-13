@@ -202,7 +202,41 @@ pytest -q
 uv run pytest -q
 ```
 
-## 11. ディレクトリ構成
+## 11. Eval駆動RAG（manual_find）実行
+
+評価データセット（30問）は `evals/manual_find_gold.jsonl` にあります。  
+次のコマンドで評価レポートを生成できます。
+
+```bash
+source .venv/bin/activate
+python scripts/eval_manual_find.py
+```
+
+出力先:
+
+- `vault/.system/evals/YYYY-MM-DDTHHMMSSZ.json`
+- `vault/.system/evals/latest.json`
+
+閾値をCIで強制したい場合:
+
+```bash
+python scripts/eval_manual_find.py --enforce-thresholds
+```
+
+Semantic Cache の有無を比較する場合:
+
+```bash
+python scripts/eval_manual_find.py --compare-sem-cache
+```
+
+比較モードでは次を同一条件で2回実行します。
+
+- `SEM_CACHE_ENABLED=false`（baseline）
+- `SEM_CACHE_ENABLED=true`（with_sem_cache）
+
+出力レポートには `baseline` / `with_sem_cache` / `metrics_delta` が含まれます。
+
+## 12. ディレクトリ構成
 
 - `manuals/<manual_id>/`
 - `vault/`
@@ -210,7 +244,7 @@ uv run pytest -q
 - `docs/`（仕様・要件）
 - `tests/`
 
-## 12. 主なドキュメント
+## 13. 主なドキュメント
 
 - `docs/spec_v2.md`（共通仕様）
 - `docs/spec_manuals.md`（manual系仕様）
@@ -218,24 +252,30 @@ uv run pytest -q
 - `docs/requirements.md`（要件）
 - `docs/rag_design_v2.md`（探索設計メモ）
 
-## 13. 環境変数
+## 14. 環境変数
 
 - `WORKSPACE_ROOT` (default: `.`)
 - `MANUALS_ROOT` (default: `${WORKSPACE_ROOT}/manuals`)
 - `VAULT_ROOT` (default: `${WORKSPACE_ROOT}/vault`)
+- `DEFAULT_MANUAL_ID` (default: `null`)
 - `LOG_LEVEL` (default: `info`)
 - `ADAPTIVE_TUNING` (default: `true`)
 - `ADAPTIVE_STATS_PATH` (default: `${VAULT_ROOT}/.system/adaptive_stats.jsonl`)
 - `ADAPTIVE_MIN_RECALL` (default: `0.90`)
 - `ADAPTIVE_CANDIDATE_LOW_BASE` (default: `3`)
 - `ADAPTIVE_FILE_BIAS_BASE` (default: `0.80`)
-- `VAULT_SCAN_DEFAULT_CHUNK_LINES` (default: `80`)
-- `VAULT_SCAN_MAX_CHUNK_LINES` (default: `200`)
 - `COVERAGE_MIN_RATIO` (default: `0.90`)
 - `MARGINAL_GAIN_MIN` (default: `0.02`)
 - `TRACE_MAX_KEEP` (default: `100`)
 - `TRACE_TTL_SEC` (default: `1800`)
 - `ALLOW_FILE_SCOPE` (default: `false`)
-- `HARD_MAX_SECTIONS` (default: `20`)
-- `HARD_MAX_CHARS` (default: `12000`)
-- `DEFAULT_MAX_STAGE` (default: `4`, allowed: `3|4`)
+- `SEM_CACHE_ENABLED` (default: `false`)
+- `SEM_CACHE_TTL_SEC` (default: `1800`)
+- `SEM_CACHE_MAX_KEEP` (default: `500`)
+- `SEM_CACHE_SIM_THRESHOLD` (default: `0.92`)
+- `SEM_CACHE_EMBEDDING_PROVIDER` (default: `none`)
+- `SEM_CACHE_MAX_SUMMARY_GAP` (default: `-1`, `-1` は無効)
+- `SEM_CACHE_MAX_SUMMARY_CONFLICT` (default: `-1`, `-1` は無効)
+
+`SEM_CACHE_EMBEDDING_PROVIDER` は現時点では `none` のみサポートします。
+`manual_find` の `use_cache` パラメータで、リクエスト単位の cache バイパスができます。

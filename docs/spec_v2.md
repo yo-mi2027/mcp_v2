@@ -1,6 +1,6 @@
 # 統合MCPサーバ v2 共通仕様（現行）
 
-最終更新: 2026-02-11
+最終更新: 2026-02-13
 
 ## 1. スコープ
 
@@ -25,6 +25,7 @@
 - `WORKSPACE_ROOT`（既定: `.`）
 - `MANUALS_ROOT`（既定: `${WORKSPACE_ROOT}/manuals`）
 - `VAULT_ROOT`（既定: `${WORKSPACE_ROOT}/vault`）
+- `DEFAULT_MANUAL_ID`（既定: `null`）
 - `LOG_LEVEL`（既定: `info`）
 - `ADAPTIVE_TUNING`（既定: `true`）
 - `ADAPTIVE_STATS_PATH`（既定: `${VAULT_ROOT}/.system/adaptive_stats.jsonl`）
@@ -36,11 +37,13 @@
 - `TRACE_MAX_KEEP`（既定: `100`）
 - `TRACE_TTL_SEC`（既定: `1800`）
 - `ALLOW_FILE_SCOPE`（既定: `false`）
-- `HARD_MAX_SECTIONS`（既定: `20`）
-- `HARD_MAX_CHARS`（既定: `12000`）
-- `DEFAULT_MAX_STAGE`（既定: `4`、許容値: `3|4`）
-- `VAULT_SCAN_DEFAULT_CHUNK_LINES`（既定: `80`）
-- `VAULT_SCAN_MAX_CHUNK_LINES`（既定: `200`）
+- `SEM_CACHE_ENABLED`（既定: `false`）
+- `SEM_CACHE_TTL_SEC`（既定: `1800`）
+- `SEM_CACHE_MAX_KEEP`（既定: `500`）
+- `SEM_CACHE_SIM_THRESHOLD`（既定: `0.92`）
+- `SEM_CACHE_EMBEDDING_PROVIDER`（既定: `none`）
+- `SEM_CACHE_MAX_SUMMARY_GAP`（既定: `-1`）
+- `SEM_CACHE_MAX_SUMMARY_CONFLICT`（既定: `-1`）
 
 ## 4. 共通安全要件
 
@@ -85,7 +88,7 @@ Actionオブジェクト:
 
 固定ルール:
 
-- `type` は次に呼ぶ現行ツール名か `stop`
+- `type` は次に呼ぶ現行ツール名
 - `params` は最小パラメータのみ返す
 
 ## 7. 非公開/廃止

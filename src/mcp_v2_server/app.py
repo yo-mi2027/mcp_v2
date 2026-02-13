@@ -94,11 +94,11 @@ def create_app(state: AppState | None = None) -> FastMCP:
     def manual_find(
         query: str,
         manual_id: str | None = None,
-        intent: str | None = None,
-        max_stage: int | None = None,
+        expand_scope: bool | None = None,
         only_unscanned_from_trace_id: str | None = None,
         budget: dict[str, Any] | None = None,
         include_claim_graph: bool | None = None,
+        use_cache: bool | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -107,11 +107,11 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 app_state,
                 query=query,
                 manual_id=manual_id,
-                intent=intent,
-                max_stage=max_stage,
+                expand_scope=expand_scope,
                 only_unscanned_from_trace_id=only_unscanned_from_trace_id,
                 budget=budget,
                 include_claim_graph=include_claim_graph,
+                use_cache=use_cache,
             ),
         )
 
@@ -119,13 +119,13 @@ def create_app(state: AppState | None = None) -> FastMCP:
     def manual_read(
         ref: dict[str, Any],
         scope: str | None = None,
-        limits: dict[str, Any] | None = None,
+        allow_file: bool | None = None,
         expand: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
             "manual_read",
-            lambda: manual_read_impl(app_state, ref=ref, scope=scope, limits=limits, expand=expand),
+            lambda: manual_read_impl(app_state, ref=ref, scope=scope, allow_file=allow_file, expand=expand),
         )
 
     @mcp.tool()
@@ -133,8 +133,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
         manual_id: str,
         path: str,
         start_line: int | None = None,
-        cursor: dict[str, Any] | None = None,
-        limits: dict[str, Any] | None = None,
+        cursor: dict[str, Any] | int | str | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -145,7 +144,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 path=path,
                 start_line=start_line,
                 cursor=cursor,
-                limits=limits,
             ),
         )
 
@@ -162,12 +160,11 @@ def create_app(state: AppState | None = None) -> FastMCP:
         path: str,
         full: bool | None = None,
         range: dict[str, Any] | None = None,
-        limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
             "vault_read",
-            lambda: vault_read_impl(app_state, path=path, full=full, range=range, limits=limits),
+            lambda: vault_read_impl(app_state, path=path, full=full, range=range),
         )
 
     @mcp.tool()
@@ -175,7 +172,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
         path: str,
         start_line: int | None = None,
         cursor: dict[str, Any] | None = None,
-        limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -185,7 +181,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 path=path,
                 start_line=start_line,
                 cursor=cursor,
-                limits=limits,
             ),
         )
 

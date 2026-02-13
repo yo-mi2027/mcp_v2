@@ -1,0 +1,30 @@
+{"case_id":"def_01","facet":"definition","query":"定義 総合医療保険","manual_id":"約款編","expected_paths":["01_総合医療保険.md"],"forbidden_paths":[]}
+{"case_id":"def_02","facet":"definition","query":"定義 がん保険","manual_id":"約款編","expected_paths":["02_がん保険(がん特約).md"],"forbidden_paths":[]}
+{"case_id":"def_03","facet":"definition","query":"定義 退院給付金特約","manual_id":"約款編","expected_paths":["06_退院給付金特約.md"],"forbidden_paths":[]}
+{"case_id":"def_04","facet":"definition","query":"定義 特定疾病診断給付金特約","manual_id":"約款編","expected_paths":["11_特定疾病診断給付金特約.md"],"forbidden_paths":[]}
+{"case_id":"def_05","facet":"definition","query":"定義 はじめに","manual_id":"給付金編","expected_paths":["01_はじめに.md"],"forbidden_paths":[]}
+{"case_id":"pro_01","facet":"procedure","query":"手順 入院 フロー","manual_id":"給付金編","expected_paths":["02-1_入院.md"],"forbidden_paths":[]}
+{"case_id":"pro_02","facet":"procedure","query":"手順 手術等 フロー","manual_id":"給付金編","expected_paths":["03-2_手術等.md"],"forbidden_paths":[]}
+{"case_id":"pro_03","facet":"procedure","query":"手順 通院特約関連 ステップ","manual_id":"給付金編","expected_paths":["07_通院特約関連.md"],"forbidden_paths":[]}
+{"case_id":"pro_04","facet":"procedure","query":"手順 先進医療特約 フロー","manual_id":"給付金編","expected_paths":["08_先進医療特約.md"],"forbidden_paths":[]}
+{"case_id":"pro_05","facet":"procedure","query":"手順 抗がん剤治療特約 フロー","manual_id":"給付金編","expected_paths":["09_抗がん剤治療特約.md"],"forbidden_paths":[]}
+{"case_id":"eli_01","facet":"eligibility","query":"条件 女性医療特約 対象","manual_id":"約款編","expected_paths":["10_女性医療特約.md"],"forbidden_paths":[]}
+{"case_id":"eli_02","facet":"eligibility","query":"条件 成人医療特約 対象","manual_id":"約款編","expected_paths":["09_成人医療特約.md"],"forbidden_paths":[]}
+{"case_id":"eli_03","facet":"eligibility","query":"条件 三疾病入院保障特約関連 対象","manual_id":"給付金編","expected_paths":["13_三疾病入院保障特約関連.md"],"forbidden_paths":[]}
+{"case_id":"eli_04","facet":"eligibility","query":"条件 対象となる女性特定疾病 対象","manual_id":"査定資料","expected_paths":["対象となる女性特定疾病.md"],"forbidden_paths":[]}
+{"case_id":"eli_05","facet":"eligibility","query":"条件 傷害特約 対象","manual_id":"給付金編","expected_paths":["15_傷害特約.md"],"forbidden_paths":[]}
+{"case_id":"exc_01","facet":"exceptions","query":"例外 特別条件 対象外","manual_id":"給付金編","expected_paths":["10_特別条件.md"],"forbidden_paths":[]}
+{"case_id":"exc_02","facet":"exceptions","query":"例外 入院初期給付特約 ただし","manual_id":"約款編","expected_paths":["04_入院初期給付特約.md"],"forbidden_paths":[]}
+{"case_id":"exc_03","facet":"exceptions","query":"例外 通院医療特約 不適用","manual_id":"約款編","expected_paths":["07_通院医療特約.md"],"forbidden_paths":[]}
+{"case_id":"exc_04","facet":"exceptions","query":"例外 先進医療特約 不適用","manual_id":"約款編","expected_paths":["08_先進医療特約.md"],"forbidden_paths":[]}
+{"case_id":"exc_05","facet":"exceptions","query":"例外 女性手術特約関連 対象外","manual_id":"給付金編","expected_paths":["12_女性手術特約関連.md"],"forbidden_paths":[]}
+{"case_id":"cmp_01","facet":"compare","query":"比較 別表13 手術給付倍率表 違い","manual_id":"査定資料","expected_paths":["別表13_手術給付倍率表.md"],"forbidden_paths":[]}
+{"case_id":"cmp_02","facet":"compare","query":"比較 別表19 手術給付倍率表 違い","manual_id":"査定資料","expected_paths":["別表19_手術給付倍率表.md"],"forbidden_paths":[]}
+{"case_id":"cmp_03","facet":"compare","query":"比較 主契約手術番号 成人病手術番号 対応","manual_id":"査定資料","expected_paths":["主契約手術番号_成人病手術番号_対応表.md"],"forbidden_paths":[]}
+{"case_id":"cmp_04","facet":"compare","query":"比較 入院 02-1 02-2","manual_id":"給付金編","expected_paths":["02-1_入院.md","02-2_入院.md"],"forbidden_paths":[]}
+{"case_id":"cmp_05","facet":"compare","query":"比較 手術 03-1 03-2","manual_id":"給付金編","expected_paths":["03-1_手術.md","03-2_手術等.md"],"forbidden_paths":[]}
+{"case_id":"unk_01","facet":"unknown","query":"ICD-10分類","manual_id":"査定資料","expected_paths":["ICD-10分類.md"],"forbidden_paths":[]}
+{"case_id":"unk_02","facet":"unknown","query":"インプットデータ template","manual_id":"schema_template","expected_paths":["インプットデータ_template.json"],"forbidden_paths":[]}
+{"case_id":"unk_03","facet":"unknown","query":"No2Input","manual_id":"inputs","expected_paths":["02_No2Input.json"],"forbidden_paths":[]}
+{"case_id":"unk_04","facet":"unknown","query":"No3Input","manual_id":"inputs","expected_paths":["03_No3Input.json"],"forbidden_paths":[]}
+{"case_id":"unk_05","facet":"unknown","query":"No7Input","manual_id":"inputs","expected_paths":["07_No.7Input.json"],"forbidden_paths":[]}

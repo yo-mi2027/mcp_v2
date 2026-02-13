@@ -15,8 +15,9 @@ class TraceEntry:
 
 class TraceStore:
     def __init__(self, max_keep: int, ttl_sec: int) -> None:
-        self.max_keep = max_keep
-        self.ttl_sec = ttl_sec
+        # Guard against invalid env/config values that can crash cleanup.
+        self.max_keep = max(1, int(max_keep))
+        self.ttl_sec = max(1, int(ttl_sec))
         self._items: OrderedDict[str, TraceEntry] = OrderedDict()
 
     def _cleanup(self) -> None:

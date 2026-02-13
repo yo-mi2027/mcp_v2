@@ -1,6 +1,6 @@
 # 統合MCPサーバ v2 要件定義（現行運用版）
 
-最終更新: 2026-02-11
+最終更新: 2026-02-13
 
 本書は現行実装の要件を運用向けに整理した文書である。  
 入出力の正本契約は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を優先する。
@@ -10,6 +10,7 @@
 - manual群（`manuals/<manual_id>/`）を横断して、抜け漏れを抑えた探索を行いたい。
 - LLMへの本文転送量を抑え、必要な箇所だけを段階取得したい。
 - 成果物やメモは `vault/` 配下に安全に保存・更新したい。
+- 探索品質を継続的に改善するため、評価（Eval）を先に定義し、変更を指標で判定したい。
 
 ## 2. 現行公開スコープ
 
@@ -46,12 +47,16 @@
 - `manual_find` は複数シグナル（見出し一致、正規化一致、loose一致、例外語彙）を統合して候補化する。
 - 結果は `trace_id` を中心に返し、詳細は `manual_hits` で段階取得できる。
 - 統合判断として `claim_graph` を内部生成し、要約として `summary` と `next_actions` を返す。
-- `max_stage` は `3|4` のみ許可。`4` では必要時に探索拡張を行う。
+- `expand_scope` は boolean。`true` では必要時に探索拡張を行う。
+- `manual_id` 未指定かつ `DEFAULT_MANUAL_ID` が設定されている場合は、その manual を探索対象にする。
+- `SEM_CACHE_ENABLED=true` の場合、`manual_find` は `exact` -> `semantic` の順で cache lookup を行う。
+- cache key は `manual_id` / `expand_scope` / `budget` / `manuals_fingerprint` で分離し、manual更新時は自動無効化する。
+- `only_unscanned_from_trace_id` 指定時は cache をバイパスし、未探索優先フローを維持する。
 
 ### 3.2 Manual本文取得
 
 - `manual_read` は `snippet|section|sections|file` の段階取得を提供する。
-- `.md` の `file` は安全制約（`ALLOW_FILE_SCOPE=true` かつ `limits.allow_file=true`）を満たす場合のみ許可。
+- `.md` の `file` は安全制約（`ALLOW_FILE_SCOPE=true`）を満たす場合のみ許可。
 - `.json` は `file` 読みを基本とし、`section|sections` は不許可。
 
 ### 3.3 Vault操作
@@ -60,6 +65,25 @@
 - `vault_read` は範囲読みを基本とし、必要時のみ `full=true`。
 - `vault_scan` は行単位の逐次取得を提供する。
 - `vault_replace` は文字列置換を提供し、`daily/` と `.system/` は禁止。
+
+### 3.4 Eval駆動RAG（manual_find系）
+
+- 評価は `manual_find` を中心とし、取得品質（retrieval）と統合品質（integration）を分離して測定する。
+- 評価データセットは少なくとも次を持つ:
+  - `query`
+  - `manual_id`（任意）
+  - `expected_paths`（期待される根拠パス群）
+  - `forbidden_paths`（誤検知として扱うパス群、任意）
+- 評価実行は `manual_find` -> `manual_hits(kind="candidates")` を基本導線とする。
+- 比較評価では `SEM_CACHE_ENABLED=false/true` の2条件を同一データセット・同一設定で実行し、差分を比較する。
+- 評価指標は少なくとも次を算出する:
+  - `hit_rate@k`（`expected_paths` が上位k件に含まれる割合）
+  - `precision@k`（上位k件の適合率）
+  - `gap_rate`（`summary.gap_count > 0` の割合）
+  - `conflict_rate`（`summary.conflict_count > 0` の割合）
+  - `p95_latency_ms`（評価対象呼び出しの95パーセンタイル遅延）
+- CIゲートは閾値ベースで実施し、閾値未達時は失敗とする。
+- 本番運用のトークン消費を抑えるため、通常運用では `include_claim_graph=false` を既定運用とし、詳細評価はバッチ/CIで実行する。
 
 ## 4. 安全要件
 
@@ -80,9 +104,11 @@
 - `budget.max_candidates >= 1`
 - `offset >= 0`
 - `limit >= 1`
-- `limits.max_sections >= 1`
-- `limits.max_chars >= 1`
-- `chunk_lines in [1, VAULT_SCAN_MAX_CHUNK_LINES]`
+- `manual_read.max_sections = 20`
+- `manual_read.max_chars = 12000`
+- `manual_scan.max_chars = 12000`
+- `vault_read.max_chars = 12000`
+- `vault_scan.max_chars = 12000`
 - `start_line >= 1`
 - `max_replacements >= 0`
 
@@ -91,6 +117,9 @@
 - ツール呼び出しログは JSONL で stderr に出力する。
 - `manual_find` の軽量統計は `ADAPTIVE_STATS_PATH` に永続化する。
 - 統計には本文を保存しない（メタ情報のみ）。
+- `manual_find` 統計には少なくとも `sem_cache_hit`, `sem_cache_mode`, `sem_cache_score`, `latency_saved_ms` を含める。
+- Eval実行結果は再現可能な形式（JSON/JSONL）で保存し、比較可能なサマリを生成する。
+- Eval結果には少なくとも次を含める: 実行日時、評価データセットID（またはハッシュ）、指標値、しきい値判定結果。
 
 ## 7. 非機能要件
 
@@ -98,8 +127,48 @@
 - stdio 実行を標準運用とする。
 - 既定設定で開発環境起動できること。
 - 単体テストとE2Eテストが通ること。
+- Evalジョブは通常運用パスと分離し、運用時の応答性能に恒常的な影響を与えないこと。
+- 同一データセット・同一コードで評価を再実行した場合、指標差分が説明可能な範囲に収まること。
 
-## 8. 本書の位置づけ
+## 8. Eval受け入れ基準（初期）
+
+- 初期導入時に、評価データセットと評価ランナーがリポジトリ内で管理されていること。
+- CIで最低1つのEvalゲートが有効化され、失敗時に原因追跡可能な出力が残ること。
+- 主要指標の暫定閾値（例: `hit_rate@5`, `gap_rate`）が明記され、変更時にレビュー対象となること。
+- 初期閾値は次を採用する:
+  - `hit_rate@5 >= 0.80`
+  - `precision@5 >= 0.50`
+  - `gap_rate <= 0.25`
+  - `conflict_rate <= 0.20`
+  - `p95_latency_ms <= 1200`
+  - `error_rate == 0`
+- 初期導入後2週間は閾値を固定し、その後の改定は週次レビューで行う。
+
+## 9. Eval初期運用プロファイル
+
+- 評価データセット初期母数は `30問` とする。
+- 初期配分は `definition/procedure/eligibility/exceptions/compare/unknown` を各 `5問` 目安とする。
+- ゴールド正解は `path` 単位で定義し、`start_line` は参考情報（非ゲート）として扱う。
+- 評価時の `manual_find` 実行条件は次で固定する:
+  - `expand_scope=true`
+  - `include_claim_graph=false`
+  - `budget.time_ms=60000`
+  - `budget.max_candidates=200`
+- CI失敗ポリシーは2段階とする:
+  - 導入後2週間は warning 運用（レポート出力のみ）
+  - 以後は hard fail（閾値未達でCI失敗）
+- Eval結果は次へ保存する:
+  - `vault/.system/evals/YYYY-MM-DDTHHMMSSZ.json`
+  - `vault/.system/evals/latest.json`
+- Semantic Cache比較時は `scripts/eval_manual_find.py --compare-sem-cache` を利用し、`baseline` と `with_sem_cache` の差分 (`metrics_delta`) を記録する。
+- Eval結果JSONには少なくとも次を含める:
+  - `dataset_hash`
+  - `metrics`
+  - `thresholds`
+  - `pass_fail`
+  - `failed_cases`
+
+## 10. 本書の位置づけ
 
 - 本書は運用要件をまとめたガイドであり、I/O契約の唯一の正本ではない。
 - 仕様差分がある場合は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を優先する。

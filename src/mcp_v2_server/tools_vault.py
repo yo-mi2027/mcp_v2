@@ -13,7 +13,7 @@ from .path_guard import (
 )
 from .state import AppState
 
-SCAN_MAX_CHARS = 9000
+SCAN_MAX_CHARS = 12000
 
 
 def _parse_int_param(
@@ -36,20 +36,20 @@ def _parse_int_param(
     return parsed
 
 
-def _resolve_max_chars(state: AppState, limits: dict[str, Any] | None) -> int:
-    max_chars = _parse_int_param(
-        (limits or {}).get("max_chars"),
-        name="limits.max_chars",
-        default=state.config.hard_max_chars,
-        min_value=1,
-    )
-    return min(max_chars, state.config.hard_max_chars)
+def _parse_bool_param(value: Any, *, name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ToolError("invalid_parameter", f"{name} must be boolean")
 
 
-def _resolve_scan_max_chars(limits: dict[str, Any] | None) -> int:
-    if limits and limits.get("max_chars") is not None:
-        raise ToolError("invalid_parameter", "limits.max_chars is fixed and cannot be changed")
-    return SCAN_MAX_CHARS
+def _normalize_scan_cursor(cursor: Any) -> dict[str, Any]:
+    if cursor is None:
+        return {}
+    if isinstance(cursor, dict):
+        return cursor
+    raise ToolError("invalid_parameter", "cursor must be an object (char_offset/start_line) or null")
 
 
 def _char_offset_from_line(text: str, line_no: int) -> int:
@@ -93,14 +93,13 @@ def vault_read(
     path: str,
     full: bool | None = None,
     range: dict[str, Any] | None = None,
-    limits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    full = bool(full)
+    full = _parse_bool_param(full, name="full", default=False)
     normalized = normalize_relative_path(path)
     file_path = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     ensure(file_path.is_file(), "not_found", "file not found", {"path": normalized})
 
-    max_chars = _resolve_max_chars(state, limits)
+    max_chars = 12000
     text = file_path.read_text(encoding="utf-8")
     lines = text.splitlines()
     total = len(lines)
@@ -114,7 +113,7 @@ def vault_read(
     truncated_reason = "none"
     if len(selected) > max_chars:
         selected = selected[:max_chars]
-        truncated_reason = "hard_limit" if max_chars >= state.config.hard_max_chars else "max_chars"
+        truncated_reason = "max_chars"
     elif not full and end_line < total:
         truncated_reason = "range_end"
 
@@ -176,25 +175,32 @@ def vault_scan(
     path: str,
     start_line: int | None = None,
     cursor: dict[str, Any] | None = None,
-    limits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_relative_path(path)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     text = target.read_text(encoding="utf-8")
-    max_chars = _resolve_scan_max_chars(limits)
-    legacy_start_line = start_line if start_line is not None else (cursor or {}).get("start_line")
+    max_chars = SCAN_MAX_CHARS
+    normalized_cursor = _normalize_scan_cursor(cursor)
 
-    if (cursor or {}).get("char_offset") is not None:
+    if start_line is not None:
+        parsed_start_line = _parse_int_param(
+            start_line,
+            name="start_line",
+            default=1,
+            min_value=1,
+        )
+        applied_start_offset = _char_offset_from_line(text, parsed_start_line)
+    elif normalized_cursor.get("char_offset") is not None:
         applied_start_offset = _parse_int_param(
-            (cursor or {}).get("char_offset"),
+            normalized_cursor.get("char_offset"),
             name="cursor.char_offset",
             default=0,
             min_value=0,
         )
-    elif legacy_start_line is not None:
+    elif normalized_cursor.get("start_line") is not None:
         parsed_start_line = _parse_int_param(
-            legacy_start_line,
-            name="start_line",
+            normalized_cursor.get("start_line"),
+            name="cursor.start_line",
             default=1,
             min_value=1,
         )

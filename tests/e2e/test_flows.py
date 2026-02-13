@@ -5,7 +5,7 @@ from mcp_v2_server.tools_vault import vault_scan
 
 
 def test_manual_flow_e2e(state) -> None:
-    found = manual_find(state, query="対象外", manual_id="m1", max_stage=4)
+    found = manual_find(state, query="対象外", manual_id="m1", expand_scope=True)
     assert "trace_id" in found
     hits = manual_hits(state, trace_id=found["trace_id"], kind="candidates", limit=10)
     assert hits["total"] >= 1

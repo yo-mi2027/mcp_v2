@@ -1,15 +1,15 @@
 # 統合MCPサーバ v2 Manual仕様（現行）
 
-最終更新: 2026-02-11
+最終更新: 2026-02-13
 
 ## 1. Tool Catalog
 
 - `manual_ls({ id? })`
 - `manual_toc({ manual_id })`
-- `manual_find({ query, manual_id?, intent?, max_stage?, only_unscanned_from_trace_id?, budget?, include_claim_graph? })`
+- `manual_find({ query, manual_id?, expand_scope?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
-- `manual_read({ ref, scope?, limits?, expand? })`
-- `manual_scan({ manual_id, path, start_line?, cursor?, chunk_lines?, limits? })`
+- `manual_read({ ref, scope?, allow_file?, expand? })`
+- `manual_scan({ manual_id, path, start_line?, cursor? })`
 
 ## 2. `manual_ls`
 
@@ -82,10 +82,10 @@ Input:
 {
   "query": "string",
   "manual_id": "string | null",
-  "intent": "definition|procedure|eligibility|exceptions|compare|unknown|null",
-  "max_stage": "number | null",
+  "expand_scope": "boolean | null",
   "only_unscanned_from_trace_id": "string | null",
   "include_claim_graph": "boolean | null",
+  "use_cache": "boolean | null",
   "budget": {
     "max_candidates": "number | null",
     "time_ms": "number | null"
@@ -117,7 +117,7 @@ Output:
           "path": "string",
           "start_line": "number"
         },
-        "signals": ["heading|normalized|loose|exceptions"],
+        "signals": ["heading|heading_focus|normalized|loose|exceptions"],
         "score": "number",
         "snippet_digest": "string"
       }
@@ -152,7 +152,7 @@ Output:
   },
   "next_actions": [
     {
-      "type": "manual_hits|manual_read|manual_find|stop",
+      "type": "manual_hits|manual_read|manual_find",
       "confidence": "number | null",
       "params": "object | null"
     }
@@ -163,10 +163,15 @@ Output:
 固定ルール:
 
 - `claim_graph` が統合の本体で、`summary` は `claim_graph` 由来の派生指標。
+- 一次候補の検索スコアは重み付き疎ベクトル（BM25）を基礎とし、`heading` / `exceptions` などのシグナル補正を加える。
 - `include_claim_graph=true` のときのみ `claim_graph` を返す。
 - `summary.conflict_count` と `manual_hits(kind="conflicts").total` は一致する。
 - `summary.gap_count` と `manual_hits(kind="gaps").total` は一致する。
-- `max_stage` は `3|4` のみ許可し、未指定時は `DEFAULT_MAX_STAGE` を適用する。
+- `expand_scope` 未指定時は `true` を適用する。
+- `manual_id` 未指定かつ `DEFAULT_MANUAL_ID` が設定されている場合は、その `manual_id` を適用する。
+- `expand_scope` と `include_claim_graph` と `use_cache` は boolean のみ許可（非booleanは `invalid_parameter`）。
+- `use_cache` 未指定時は `SEM_CACHE_ENABLED` 設定値を適用する。
+- cache hit でも `summary.gap_count/conflict_count` が閾値（`SEM_CACHE_MAX_SUMMARY_GAP/SEM_CACHE_MAX_SUMMARY_CONFLICT`）を超える場合は再探索する。
 - `budget.time_ms` 既定値は `60000`、`budget.max_candidates` 既定値は `200`。
 - `budget.time_ms` と `budget.max_candidates` は整数かつ `>= 1`。
 - 整数変換不能値は `invalid_parameter`。
@@ -212,17 +217,12 @@ Input:
 ```json
 {
   "ref": {
-    "target": "manual (or omitted)",
     "manual_id": "string",
     "path": "string",
     "start_line": "number | null"
   },
   "scope": "snippet|section|sections|file|null",
-  "limits": {
-    "max_sections": "number | null",
-    "max_chars": "number | null",
-    "allow_file": "boolean | null"
-  },
+  "allow_file": "boolean | null",
   "expand": {
     "before_chars": "number | null",
     "after_chars": "number | null"
@@ -232,14 +232,11 @@ Input:
 
 固定ルール:
 
-- `ref.target` 未指定時は `manual` を補完。
-- `ref.target != manual` は `invalid_parameter`。
 - `.md` 既定 `scope=section`、`.json` 既定 `scope=file`。
-- `.md` の `scope=file` は `ALLOW_FILE_SCOPE=true` かつ `limits.allow_file=true` 必須。
+- `.md` の `scope=file` は `ALLOW_FILE_SCOPE=true` かつ `allow_file=true` 必須。
+- `allow_file` は boolean のみ許可（非booleanは `invalid_parameter`）。
 - `.json` で `scope=section|sections` は `invalid_scope`。
-- `limits.max_sections` 既定値は `20`、`limits.max_chars` 既定値は `8000`。
-- `limits.max_sections` は整数かつ `>= 1`、`limits.max_chars` は整数かつ `>= 1`。
-- `limits` の上限は `HARD_MAX_SECTIONS` / `HARD_MAX_CHARS` でクランプする。
+- `max_sections` は固定値 `20`、`max_chars` は固定値 `12000`。
 - `expand.before_chars` / `expand.after_chars` は整数かつ `>= 0`。
 - `.md` の `scope=section` で同一セクション再要求を検知した場合は、同一ファイルの次行から `manual_scan` 相当の自動フォールバックを行う。
 
@@ -268,22 +265,18 @@ Input:
   "path": "string",
   "start_line": "number | null",
   "cursor": {
-    "start_line": "number | null"
-  },
-  "chunk_lines": "number | null",
-  "limits": {
-    "max_chars": "number | null"
-  }
+    "start_line": "number | null",
+    "char_offset": "number | null"
+  } | "number | string (char_offset shorthand) | null"
 }
 ```
 
 固定ルール:
 
-- `chunk_lines` 未指定時は `VAULT_SCAN_DEFAULT_CHUNK_LINES` を適用する。
-- `chunk_lines` は整数かつ `1..VAULT_SCAN_MAX_CHUNK_LINES` の範囲のみ許可。
 - `start_line` 指定時はそれを優先し、未指定時は `cursor.start_line`（未指定なら1）を使う。
+- `cursor` は object 形式に加えて、`char_offset` の shorthand として `number|string` も許可する。
 - `start_line`（または `cursor.start_line`）は整数かつ対象ファイルの総行数範囲内のみ許可。
-- `limits.max_chars` は整数かつ `>= 1`、`HARD_MAX_CHARS` で上限制限。
+- `max_chars` は固定値 `12000`（`SCAN_MAX_CHARS`）で、入力から変更不可。
 
 Output:
 
@@ -297,13 +290,12 @@ Output:
     "end_line": "number"
   },
   "next_cursor": {
-    "start_line": "number | null"
+    "char_offset": "number | null"
   },
   "eof": "boolean",
   "truncated": "boolean",
-  "truncated_reason": "none|chunk_end|max_chars|hard_limit",
+  "truncated_reason": "none|max_chars",
   "applied": {
-    "chunk_lines": "number",
     "max_chars": "number"
   }
 }

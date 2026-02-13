@@ -22,7 +22,7 @@ def test_vault_read_requires_range_when_not_full(state) -> None:
 
 def test_vault_scan_uses_fixed_max_chars(state) -> None:
     out = vault_scan(state, path="source.md")
-    assert out["applied"]["max_chars"] == 9000
+    assert out["applied"]["max_chars"] == 12000
 
 
 def test_vault_read_rejects_out_of_range_start_line(state) -> None:
@@ -31,16 +31,15 @@ def test_vault_read_rejects_out_of_range_start_line(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
-@pytest.mark.parametrize(
-    ("range_obj", "limits"),
-    [
-        ({"start_line": "abc", "end_line": 2}, None),
-        ({"start_line": 1, "end_line": 2}, {"max_chars": -1}),
-    ],
-)
-def test_vault_read_rejects_invalid_numeric_parameters(state, range_obj, limits) -> None:
+def test_vault_read_rejects_invalid_range_numbers(state) -> None:
     with pytest.raises(ToolError) as e:
-        vault_read(state, path="source.md", full=False, range=range_obj, limits=limits)
+        vault_read(state, path="source.md", full=False, range={"start_line": "abc", "end_line": 2})
+    assert e.value.code == "invalid_parameter"
+
+
+def test_vault_read_rejects_non_boolean_full(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_read(state, path="source.md", full="false", range={"start_line": 1, "end_line": 2})
     assert e.value.code == "invalid_parameter"
 
 
@@ -99,12 +98,17 @@ def test_vault_scan_start_line_takes_precedence_over_cursor(state) -> None:
     assert out["applied_range"] == {"start_line": 4, "end_line": 5}
 
 
+def test_vault_scan_start_line_takes_precedence_over_cursor_char_offset(state) -> None:
+    out = vault_scan(state, path="source.md", start_line=4, cursor={"char_offset": 0, "start_line": 1})
+    assert out["applied_range"]["start_line"] == 4
+
+
 def test_vault_scan_paginates_with_char_offset_cursor(state) -> None:
-    text = ("b" * 9050) + "\nend\n"
+    text = ("b" * 12050) + "\nend\n"
     (state.config.vault_root / "long.md").write_text(text, encoding="utf-8")
     first = vault_scan(state, path="long.md")
     assert first["truncated_reason"] == "max_chars"
-    assert first["next_cursor"]["char_offset"] == 9000
+    assert first["next_cursor"]["char_offset"] == 12000
 
     second = vault_scan(state, path="long.md", cursor=first["next_cursor"])
     assert second["eof"] is True
@@ -112,9 +116,9 @@ def test_vault_scan_paginates_with_char_offset_cursor(state) -> None:
     assert len(first["text"]) + len(second["text"]) == len(text)
 
 
-def test_vault_scan_rejects_max_chars_override(state) -> None:
+def test_vault_scan_rejects_non_object_cursor(state) -> None:
     with pytest.raises(ToolError) as e:
-        vault_scan(state, path="source.md", limits={"max_chars": 5})
+        vault_scan(state, path="source.md", cursor=1)  # type: ignore[arg-type]
     assert e.value.code == "invalid_parameter"
 
 
