@@ -46,6 +46,15 @@ class Config:
     adaptive_file_bias_base: float
     coverage_min_ratio: float
     marginal_gain_min: float
+    corrective_enabled: bool
+    corrective_coverage_min: float
+    corrective_margin_min: float
+    corrective_min_candidates: int
+    corrective_on_conflict: bool
+    sparse_query_coverage_weight: float
+    late_rerank_enabled: bool
+    late_rerank_top_n: int
+    late_rerank_weight: float
     trace_max_keep: int
     trace_ttl_sec: int
     allow_file_scope: bool
@@ -79,6 +88,15 @@ class Config:
             adaptive_file_bias_base=_env_float("ADAPTIVE_FILE_BIAS_BASE", 0.80),
             coverage_min_ratio=_env_float("COVERAGE_MIN_RATIO", 0.90),
             marginal_gain_min=_env_float("MARGINAL_GAIN_MIN", 0.02),
+            corrective_enabled=_env_bool("CORRECTIVE_ENABLED", False),
+            corrective_coverage_min=_env_float("CORRECTIVE_COVERAGE_MIN", 0.90),
+            corrective_margin_min=_env_float("CORRECTIVE_MARGIN_MIN", 0.15),
+            corrective_min_candidates=_env_int("CORRECTIVE_MIN_CANDIDATES", 3),
+            corrective_on_conflict=_env_bool("CORRECTIVE_ON_CONFLICT", True),
+            sparse_query_coverage_weight=_env_float("SPARSE_QUERY_COVERAGE_WEIGHT", 0.35),
+            late_rerank_enabled=_env_bool("LATE_RERANK_ENABLED", False),
+            late_rerank_top_n=_env_int("LATE_RERANK_TOP_N", 50),
+            late_rerank_weight=_env_float("LATE_RERANK_WEIGHT", 0.60),
             trace_max_keep=_env_int("TRACE_MAX_KEEP", 100),
             trace_ttl_sec=_env_int("TRACE_TTL_SEC", 1800),
             allow_file_scope=_env_bool("ALLOW_FILE_SCOPE", False),

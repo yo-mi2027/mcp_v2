@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mcp_v2_server.eval_manual_find import evaluate_manual_find
+from mcp_v2_eval.eval_manual_find import evaluate_manual_find
 
 
 def _sample_cases() -> list[dict[str, object]]:
@@ -44,6 +44,7 @@ def test_eval_gate_passes_with_reasonable_thresholds(state) -> None:
     out = evaluate_manual_find(state, _sample_cases(), top_k=1, thresholds=thresholds)
     assert out["pass_fail"]["all_passed"] is True
     assert out["metrics"]["error_rate"] == 0.0
+    assert "tokens_per_query" in out["metrics"]
 
 
 def test_eval_gate_detects_failure(state) -> None:

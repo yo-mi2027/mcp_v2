@@ -1,6 +1,6 @@
 # RAG設計書 v2（現行実装ベース）
 
-最終更新: 2026-02-13
+最終更新: 2026-02-14
 
 本書は `manual_find` を中心にした探索設計の説明資料である。  
 入出力の正本契約は `spec_manuals.md` を参照。
@@ -28,12 +28,15 @@
 - 対象 manual 群を決定
 - `.md` は見出しノード単位、`.json` はファイル単位で走査
 - シグナル（`heading`, `normalized`, `loose`, `exceptions`）を評価
+- BM25 を基礎に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT`）を加点
+- `LATE_RERANK_ENABLED=true` または `late_reranker` hook 指定時は候補上位へ late interaction rerank を適用
 - 厳密一致シグナル（`heading|normalized|loose`）がある候補のみ採用（`exceptions` 単独では採用しない）
 
 4. 必要時の拡張
 - `expand_scope=true` の場合、条件に応じて探索スコープを拡張
 - クエリ語彙と候補分布をもとに例外語彙中心の補助パスを段階実行
 - `only_unscanned_from_trace_id` 指定時は未探索セクションを優先
+- `CORRECTIVE_ENABLED=true` の場合、stage3 品質（gap/conflict/coverage/top-score margin/candidates）で stage4 昇格を判定
 
 5. 統合判断
 - 候補から `claim_graph`（claims/evidences/edges/facets）を構築
@@ -77,9 +80,11 @@
 ## 6. 観測項目（`ADAPTIVE_STATS_PATH`）
 
 - `sem_cache_hit`: cache hit の有無
-- `sem_cache_mode`: `bypass|miss|exact|semantic`
+- `sem_cache_mode`: `bypass|miss|exact|semantic|guard_revalidate`
 - `sem_cache_score`: semantic 類似度スコア（exact/miss時は `null` 可）
 - `latency_saved_ms`: cache hit 時の推定短縮時間（ms）
+- `corrective_triggered`: Corrective 判定が発火したか
+- `stage4_executed`: stage4 の拡張探索を実行したか
 
 ## 7. 非対象（本書）
 

@@ -236,6 +236,17 @@ python scripts/eval_manual_find.py --compare-sem-cache
 
 出力レポートには `baseline` / `with_sem_cache` / `metrics_delta` が含まれます。
 
+Late rerank の有無を比較する場合:
+
+```bash
+python scripts/eval_manual_find.py --compare-late-rerank
+```
+
+比較モードでは次を同一条件で2回実行します。
+
+- `LATE_RERANK_ENABLED=false`（baseline）
+- `LATE_RERANK_ENABLED=true`（with_late_rerank）
+
 ## 12. ディレクトリ構成
 
 - `manuals/<manual_id>/`
@@ -266,6 +277,15 @@ python scripts/eval_manual_find.py --compare-sem-cache
 - `ADAPTIVE_FILE_BIAS_BASE` (default: `0.80`)
 - `COVERAGE_MIN_RATIO` (default: `0.90`)
 - `MARGINAL_GAIN_MIN` (default: `0.02`)
+- `CORRECTIVE_ENABLED` (default: `false`)
+- `CORRECTIVE_COVERAGE_MIN` (default: `0.90`)
+- `CORRECTIVE_MARGIN_MIN` (default: `0.15`)
+- `CORRECTIVE_MIN_CANDIDATES` (default: `3`)
+- `CORRECTIVE_ON_CONFLICT` (default: `true`)
+- `SPARSE_QUERY_COVERAGE_WEIGHT` (default: `0.35`)
+- `LATE_RERANK_ENABLED` (default: `false`)
+- `LATE_RERANK_TOP_N` (default: `50`)
+- `LATE_RERANK_WEIGHT` (default: `0.60`)
 - `TRACE_MAX_KEEP` (default: `100`)
 - `TRACE_TTL_SEC` (default: `1800`)
 - `ALLOW_FILE_SCOPE` (default: `false`)

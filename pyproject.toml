@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastmcp>=2.12.0,<3.0.0",
-  "pydantic>=2.10.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +18,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_v2_server"]
+packages = ["src/mcp_v2_server", "src/mcp_v2_eval"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -26,6 +26,7 @@ class AppState:
     sparse_index: SparseIndexStore
     read_progress: dict[str, dict[str, int | None]] = field(default_factory=dict)
     next_actions_planner: Callable[[dict[str, Any]], Any] | None = None
+    late_reranker: Callable[[dict[str, Any]], Any] | None = None
 
 
 def create_state(config: Config | None = None) -> AppState:

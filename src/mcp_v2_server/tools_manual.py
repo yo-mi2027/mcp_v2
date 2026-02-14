@@ -197,6 +197,9 @@ def _record_manual_find_stats(
     scoring_mode: str = "heuristic",
     index_rebuilt: bool = False,
     index_docs: int | None = None,
+    corrective_triggered: bool = False,
+    corrective_reasons: list[str] | None = None,
+    stage4_executed: bool = False,
 ) -> None:
     chars_in = len(query)
     chars_out = len(str(summary))
@@ -229,6 +232,9 @@ def _record_manual_find_stats(
             "scoring_mode": scoring_mode,
             "index_rebuilt": index_rebuilt,
             "index_docs": index_docs,
+            "corrective_triggered": corrective_triggered,
+            "corrective_reasons": corrective_reasons or [],
+            "stage4_executed": stage4_executed,
         }
     )
 
@@ -931,6 +937,175 @@ def _should_expand_scope(
     )
 
 
+def _query_coverage_score(query_terms: set[str], doc_term_freq: dict[str, int]) -> float:
+    if not query_terms:
+        return 0.0
+    hits = sum(1 for term in query_terms if term in doc_term_freq)
+    return hits / len(query_terms)
+
+
+def _late_interaction_maxsim(query_terms: set[str], doc_terms: set[str]) -> float:
+    if not query_terms or not doc_terms:
+        return 0.0
+    score_sum = 0.0
+    for q in query_terms:
+        best = 0.0
+        for t in doc_terms:
+            if q == t:
+                best = 1.0
+                break
+            if q in t or t in q:
+                best = max(best, 0.7)
+        score_sum += best
+    return round(score_sum / len(query_terms), 4)
+
+
+def _rerank_candidates_with_late_interaction(
+    *,
+    query: str,
+    candidates: list[dict[str, Any]],
+    doc_terms_by_key: dict[str, set[str]],
+    top_n: int,
+    weight: float,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return candidates
+    query_terms = set(split_terms(query))
+    if not query_terms:
+        return candidates
+    applied_top_n = max(1, int(top_n))
+    applied_weight = max(0.0, float(weight))
+    if applied_weight <= 0.0:
+        return candidates
+
+    out = [dict(item) for item in candidates]
+    for idx, item in enumerate(out):
+        if idx >= applied_top_n:
+            break
+        key = _candidate_key(item)
+        doc_terms = doc_terms_by_key.get(key) or set()
+        late_score = _late_interaction_maxsim(query_terms, doc_terms)
+        if late_score <= 0.0:
+            continue
+        score = float(item.get("score") or 0.0)
+        boosted = score + (applied_weight * late_score)
+        item["score"] = round(boosted, 4)
+        signals = set(item.get("signals") or [])
+        signals.add("late_rerank")
+        item["signals"] = sorted(signals)
+        ref = dict(item.get("ref") or {})
+        ref_signals = set(ref.get("signals") or [])
+        ref_signals.add("late_rerank")
+        ref["signals"] = sorted(ref_signals)
+        item["ref"] = ref
+
+    return sorted(
+        out,
+        key=lambda x: (-float(x["score"]), str(x["path"]), int(x.get("start_line") or 1)),
+    )
+
+
+def _apply_late_rerank(
+    *,
+    state: AppState,
+    query: str,
+    candidates: list[dict[str, Any]],
+    doc_terms_by_key: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    def _is_candidate_row(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        ref = row.get("ref")
+        if not isinstance(ref, dict):
+            return False
+        if not isinstance(ref.get("path"), str) or not ref.get("path"):
+            return False
+        if not isinstance(row.get("path"), str) or not row.get("path"):
+            return False
+        if not isinstance(row.get("signals"), list):
+            return False
+        score = row.get("score")
+        return isinstance(score, (int, float)) and not isinstance(score, bool)
+
+    reranker = state.late_reranker
+    if reranker is not None:
+        try:
+            raw = reranker(
+                {
+                    "query": query,
+                    "candidates": [dict(item) for item in candidates],
+                    "top_n": int(state.config.late_rerank_top_n),
+                    "weight": float(state.config.late_rerank_weight),
+                }
+            )
+            if isinstance(raw, list) and all(_is_candidate_row(item) for item in raw):
+                return sorted(
+                    raw,
+                    key=lambda x: (-float(x["score"]), str(x["path"]), int(x.get("start_line") or 1)),
+                )
+        except Exception:
+            pass
+    if not state.config.late_rerank_enabled:
+        return candidates
+    return _rerank_candidates_with_late_interaction(
+        query=query,
+        candidates=candidates,
+        doc_terms_by_key=doc_terms_by_key,
+        top_n=state.config.late_rerank_top_n,
+        weight=state.config.late_rerank_weight,
+    )
+
+
+def _top_score_margin(candidates: list[dict[str, Any]], *, top_k: int = 5) -> float:
+    if not candidates:
+        return 0.0
+    applied_top_k = max(1, int(top_k))
+    scores = [float(item.get("score") or 0.0) for item in candidates[:applied_top_k]]
+    top_score = scores[0]
+    if len(scores) == 1:
+        return 1.0 if top_score > 0 else 0.0
+    rest_mean = sum(scores[1:]) / len(scores[1:])
+    denom = max(1.0, abs(top_score))
+    return max(0.0, round((top_score - rest_mean) / denom, 4))
+
+
+def _needs_corrective_escalation(
+    state: AppState,
+    *,
+    summary: dict[str, Any],
+    coverage_ratio: float,
+    top_margin: float,
+    total: int,
+) -> tuple[bool, list[str]]:
+    if not state.config.corrective_enabled:
+        return False, []
+
+    min_candidates = max(1, int(state.config.corrective_min_candidates))
+    coverage_min = max(0.0, min(1.0, float(state.config.corrective_coverage_min)))
+    margin_min = max(0.0, float(state.config.corrective_margin_min))
+    try:
+        gap_count = int(summary.get("gap_count", 0))
+    except (TypeError, ValueError):
+        gap_count = 0
+    try:
+        conflict_count = int(summary.get("conflict_count", 0))
+    except (TypeError, ValueError):
+        conflict_count = 0
+
+    reasons: list[str] = []
+    if gap_count > 0:
+        reasons.append("corrective_gap")
+    if state.config.corrective_on_conflict and conflict_count > 0:
+        reasons.append("corrective_conflict")
+    if total < min_candidates:
+        reasons.append("corrective_low_candidates")
+    if coverage_ratio < coverage_min:
+        reasons.append("corrective_low_coverage")
+    if top_margin < margin_min:
+        reasons.append("corrective_low_margin")
+    return bool(reasons), reasons
+
+
 def _plan_next_actions(summary: dict[str, Any], query: str, max_stage: int) -> list[dict[str, Any]]:
     del query, max_stage
     if summary["conflict_count"] > 0:
@@ -1001,6 +1176,8 @@ def _run_find_pass(
         for synonym in SYNONYMS.get(term, []):
             expanded_terms.add(normalize_text(synonym))
     weighted_terms = {term for term in expanded_terms if term}
+    sparse_weight = max(0.0, float(state.config.sparse_query_coverage_weight))
+    doc_terms_by_key: dict[str, set[str]] = {}
 
     manuals_fp = _manuals_fingerprint(state, manual_ids)
     sparse_index, index_rebuilt = state.sparse_index.get_or_build(manual_ids=manual_ids, fingerprint=manuals_fp)
@@ -1075,7 +1252,12 @@ def _run_find_pass(
                     signals.add("exceptions")
                 if strict_signals == 0:
                     continue
-                score = (SCORE_WEIGHT_BM25 * float(bm25_map.get(doc_id, 0.0))) + _score_from_signals(signals)
+                coverage_bonus = sparse_weight * _query_coverage_score(weighted_terms, doc.term_freq)
+                score = (
+                    (SCORE_WEIGHT_BM25 * float(bm25_map.get(doc_id, 0.0)))
+                    + _score_from_signals(signals)
+                    + coverage_bonus
+                )
                 item = {
                     "ref": {
                         "target": "manual",
@@ -1099,12 +1281,22 @@ def _run_find_pass(
                 prev = candidates.get(key)
                 if prev is None or item["score"] > prev["score"]:
                     candidates[key] = item
+                    top_terms = sorted(doc.term_freq.items(), key=lambda kv: kv[1], reverse=True)
+                    doc_terms = {term for term, _ in top_terms[:128]}
+                    doc_terms.update(split_terms(doc.title))
+                    doc_terms_by_key[key] = doc_terms
         if cutoff_reason:
             break
 
     ordered = sorted(
         candidates.values(),
         key=lambda x: (-float(x["score"]), str(x["path"]), int(x.get("start_line") or 1)),
+    )
+    ordered = _apply_late_rerank(
+        state=state,
+        query=query,
+        candidates=ordered,
+        doc_terms_by_key=doc_terms_by_key,
     )
     return ordered, scanned_files, scanned_nodes, warnings, cutoff_reason, unscanned_sections, index_rebuilt, index_docs
 
@@ -1284,6 +1476,9 @@ def manual_find(
     sem_cache_mode = "miss" if use_semantic_cache else "bypass"
     sem_cache_score: float | None = None
     latency_saved_ms: int | None = None
+    corrective_triggered = False
+    corrective_reasons: list[str] = []
+    stage4_executed = False
     if applied_manual_id:
         ensure(
             _manual_exists(state.config.manuals_root, applied_manual_id),
@@ -1432,12 +1627,34 @@ def manual_find(
         candidate_low_threshold=candidate_low_threshold,
         file_bias_threshold=file_bias_threshold,
     )
+    provisional_claim_graph = _build_claim_graph(
+        query=query,
+        candidates=candidates,
+    )
+    provisional_summary = _build_summary(
+        claim_graph=provisional_claim_graph,
+        candidates=candidates,
+        scanned_files=scanned_files,
+        scanned_nodes=scanned_nodes,
+        candidate_low_threshold=candidate_low_threshold,
+        file_bias_threshold=file_bias_threshold,
+    )
+    corrective_triggered, corrective_reasons = _needs_corrective_escalation(
+        state,
+        summary=provisional_summary,
+        coverage_ratio=_claim_coverage_ratio(provisional_claim_graph),
+        top_margin=_top_score_margin(candidates),
+        total=total,
+    )
+    stage4_needed = should_expand or corrective_triggered
+    if corrective_triggered:
+        escalation_reasons.extend(corrective_reasons)
     prefers_exceptions = _query_prefers_exceptions(query) or exception_hits > 0
 
     scope_expanded = False
     merged_candidates = {(_candidate_key(item)): item for item in candidates}
     if applied_max_stage == 4:
-        if should_expand and prefers_exceptions:
+        if stage4_needed and prefers_exceptions:
             local_paths: dict[str, set[str]] | None = None
             if applied_manual_id:
                 seed_paths = {
@@ -1448,6 +1665,7 @@ def manual_find(
                 if seed_paths:
                     local_paths = {applied_manual_id: seed_paths}
             if local_paths:
+                stage4_executed = True
                 extra, sf2, sn2, w2, cutoff2, unscanned2 = _run_exceptions_expand_pass(
                     state=state,
                     manual_ids=[applied_manual_id] if applied_manual_id else selected_manual_ids,
@@ -1474,8 +1692,10 @@ def manual_find(
                     candidate_low_threshold=candidate_low_threshold,
                     file_bias_threshold=file_bias_threshold,
                 )
+                stage4_needed = should_expand or corrective_triggered
 
-            if should_expand and applied_manual_id:
+            if stage4_needed and applied_manual_id:
+                stage4_executed = True
                 extra, sf2, sn2, w2, cutoff2, unscanned2 = _run_exceptions_expand_pass(
                     state=state,
                     manual_ids=[applied_manual_id],
@@ -1501,8 +1721,10 @@ def manual_find(
                     candidate_low_threshold=candidate_low_threshold,
                     file_bias_threshold=file_bias_threshold,
                 )
+                stage4_needed = should_expand or corrective_triggered
 
-            if should_expand:
+            if stage4_needed:
+                stage4_executed = True
                 global_ids = discover_manual_ids(state.config.manuals_root)
                 cache_manual_ids_for_put = global_ids
                 extra, sf2, sn2, w2, cutoff2, unscanned2 = _run_exceptions_expand_pass(
@@ -1530,16 +1752,20 @@ def manual_find(
                     candidate_low_threshold=candidate_low_threshold,
                     file_bias_threshold=file_bias_threshold,
                 )
+                stage4_needed = should_expand or corrective_triggered
 
-        if should_expand and applied_manual_id:
+        if stage4_needed and applied_manual_id:
             if total == 0:
                 escalation_reasons.append("zero_candidates")
             if total < candidate_low_threshold:
                 escalation_reasons.append("low_candidates")
             if total >= 5 and file_bias >= file_bias_threshold:
                 escalation_reasons.append("file_bias")
+            if corrective_triggered:
+                escalation_reasons.append("corrective_stage4")
             expanded_ids = discover_manual_ids(state.config.manuals_root)
             cache_manual_ids_for_put = expanded_ids
+            stage4_executed = True
             extra, sf2, sn2, w2, cutoff2, unscanned2, index_rebuilt2, index_docs2 = _run_find_pass(
                 state=state,
                 manual_ids=expanded_ids,
@@ -1562,13 +1788,15 @@ def manual_find(
             index_docs = max(index_docs, index_docs2)
             scope_expanded = True
             escalation_reasons.append("manual_scope_expanded")
-    elif applied_manual_id and should_expand:
+    elif applied_manual_id and stage4_needed:
         if total == 0:
             escalation_reasons.append("zero_candidates")
         if total < candidate_low_threshold:
             escalation_reasons.append("low_candidates")
         if total >= 5 and file_bias >= file_bias_threshold:
             escalation_reasons.append("file_bias")
+        if corrective_triggered:
+            escalation_reasons.append("corrective_stage_cap")
         cutoff_reason = cutoff_reason or "stage_cap"
         escalation_reasons.append("stage_cap")
         # max_stage=3 の場合、他manualへの拡張を未実行として unscanned に残す。
@@ -1578,13 +1806,15 @@ def manual_find(
                 continue
             for row in list_manual_files(state.config.manuals_root, manual_id=extra_id):
                 unscanned.append({"manual_id": extra_id, "path": row.path, "reason": "stage_cap"})
-    if should_expand and not applied_manual_id:
+    if stage4_needed and not applied_manual_id:
         if total == 0:
             escalation_reasons.append("zero_candidates")
         if total < candidate_low_threshold:
             escalation_reasons.append("low_candidates")
         if total >= 5 and file_bias >= file_bias_threshold:
             escalation_reasons.append("file_bias")
+        if corrective_triggered:
+            escalation_reasons.append("corrective_global_scope")
 
     candidates = _apply_heading_focus(candidates)
 
@@ -1720,6 +1950,9 @@ def manual_find(
             scoring_mode="bm25",
             index_rebuilt=index_rebuilt,
             index_docs=index_docs,
+            corrective_triggered=corrective_triggered,
+            corrective_reasons=corrective_reasons,
+            stage4_executed=stage4_executed,
         )
 
     if use_semantic_cache and cache_scope_key and cache_query:

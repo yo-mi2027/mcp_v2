@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .errors import ToolError
-from .state import AppState
-from .tools_manual import manual_find, manual_hits
+from mcp_v2_server.errors import ToolError
+from mcp_v2_server.state import AppState
+from mcp_v2_server.tools_manual import manual_find, manual_hits
 
 DEFAULT_BUDGET_TIME_MS = 60000
 DEFAULT_BUDGET_MAX_CANDIDATES = 200
@@ -105,6 +105,16 @@ def _judge_threshold(metric_value: float, rule: dict[str, Any]) -> bool:
     raise ValueError(f"unsupported threshold op: {op}")
 
 
+def _estimate_case_tokens(summary: dict[str, Any], hit_items: list[dict[str, Any]]) -> int:
+    chars = len(json.dumps(summary, ensure_ascii=False))
+    for item in hit_items:
+        ref = item.get("ref") or {}
+        chars += len(str(ref.get("path") or ""))
+        chars += len(str(ref.get("title") or ""))
+        chars += 24
+    return max(1, (chars + 3) // 4)
+
+
 def evaluate_manual_find(
     state: AppState,
     cases: list[dict[str, Any]],
@@ -149,8 +159,9 @@ def evaluate_manual_find(
             trace_id = str(found["trace_id"])
             summary = found.get("summary") or {}
             hits = manual_hits(state, trace_id=trace_id, kind="candidates", offset=0, limit=top_k)
+            hit_items = [item for item in (hits.get("items") or []) if isinstance(item, dict)]
             top_paths: list[str] = []
-            for item in hits.get("items") or []:
+            for item in hit_items:
                 ref = item.get("ref") or {}
                 path = ref.get("path")
                 if isinstance(path, str) and path and path not in top_paths:
@@ -161,6 +172,7 @@ def evaluate_manual_find(
             precision_retrieved = (relevant_count / len(top_paths)) if top_paths else 0.0
             forbidden_hit = any(path in forbidden_paths for path in top_paths) if forbidden_paths else False
             latency_ms = int((time.monotonic() - started) * 1000)
+            est_tokens = _estimate_case_tokens(summary, hit_items)
             rows.append(
                 {
                     "case_id": case_id,
@@ -179,6 +191,7 @@ def evaluate_manual_find(
                     "gap": int(summary.get("gap_count", 0)) > 0,
                     "conflict": int(summary.get("conflict_count", 0)) > 0,
                     "forbidden_hit": forbidden_hit,
+                    "est_tokens": est_tokens,
                     "error": None,
                 }
             )
@@ -201,6 +214,7 @@ def evaluate_manual_find(
                     "gap": False,
                     "conflict": False,
                     "forbidden_hit": False,
+                    "est_tokens": 0,
                     "error": {"code": e.code, "message": e.message},
                 }
             )
@@ -223,6 +237,7 @@ def evaluate_manual_find(
                     "gap": False,
                     "conflict": False,
                     "forbidden_hit": False,
+                    "est_tokens": 0,
                     "error": {"code": "unknown", "message": str(e)},
                 }
             )
@@ -233,6 +248,7 @@ def evaluate_manual_find(
     hit_key = f"hit_rate@{top_k}"
     precision_key = f"precision@{top_k}"
     case_latencies = [float(row["latency_ms"]) for row in rows]
+    case_tokens = [float(row.get("est_tokens") or 0.0) for row in rows]
     metrics = {
         hit_key: round(sum(1 for row in rows if row["hit"]) / total_cases, 4),
         precision_key: round(sum(float(row["precision"]) for row in rows) / total_cases, 4),
@@ -240,6 +256,7 @@ def evaluate_manual_find(
         "gap_rate": round(sum(1 for row in rows if row["gap"]) / total_cases, 4),
         "conflict_rate": round(sum(1 for row in rows if row["conflict"]) / total_cases, 4),
         "p95_latency_ms": round(_percentile(case_latencies, 95), 2),
+        "tokens_per_query": round(sum(case_tokens) / total_cases, 2),
         "error_rate": round(sum(1 for row in rows if not row["ok"]) / total_cases, 4),
         "forbidden_hit_rate": round(sum(1 for row in rows if row["forbidden_hit"]) / total_cases, 4),
     }

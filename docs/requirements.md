@@ -45,6 +45,8 @@
 ### 3.1 Manual探索
 
 - `manual_find` は複数シグナル（見出し一致、正規化一致、loose一致、例外語彙）を統合して候補化する。
+- 一次候補のスコアリングは BM25 に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT`）を加える。
+- `LATE_RERANK_ENABLED=true` の場合、候補上位へ late interaction rerank を適用する。
 - 結果は `trace_id` を中心に返し、詳細は `manual_hits` で段階取得できる。
 - 統合判断として `claim_graph` を内部生成し、要約として `summary` と `next_actions` を返す。
 - `expand_scope` は boolean。`true` では必要時に探索拡張を行う。
@@ -52,6 +54,7 @@
 - `SEM_CACHE_ENABLED=true` の場合、`manual_find` は `exact` -> `semantic` の順で cache lookup を行う。
 - cache key は `manual_id` / `expand_scope` / `budget` / `manuals_fingerprint` で分離し、manual更新時は自動無効化する。
 - `only_unscanned_from_trace_id` 指定時は cache をバイパスし、未探索優先フローを維持する。
+- `CORRECTIVE_ENABLED=true` の場合、stage3 結果の品質が閾値未達なら stage4 へ昇格する（`CORRECTIVE_*` で調整）。
 
 ### 3.2 Manual本文取得
 
@@ -82,6 +85,7 @@
   - `gap_rate`（`summary.gap_count > 0` の割合）
   - `conflict_rate`（`summary.conflict_count > 0` の割合）
   - `p95_latency_ms`（評価対象呼び出しの95パーセンタイル遅延）
+  - `tokens_per_query`（要約+候補メタ情報から推定した1クエリ当たりトークン量）
 - CIゲートは閾値ベースで実施し、閾値未達時は失敗とする。
 - 本番運用のトークン消費を抑えるため、通常運用では `include_claim_graph=false` を既定運用とし、詳細評価はバッチ/CIで実行する。
 
@@ -161,6 +165,7 @@
   - `vault/.system/evals/YYYY-MM-DDTHHMMSSZ.json`
   - `vault/.system/evals/latest.json`
 - Semantic Cache比較時は `scripts/eval_manual_find.py --compare-sem-cache` を利用し、`baseline` と `with_sem_cache` の差分 (`metrics_delta`) を記録する。
+- Late rerank比較時は `scripts/eval_manual_find.py --compare-late-rerank` を利用し、`baseline` と `with_late_rerank` の差分 (`metrics_delta`) を記録する。
 - Eval結果JSONには少なくとも次を含める:
   - `dataset_hash`
   - `metrics`

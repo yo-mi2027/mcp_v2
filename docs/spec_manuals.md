@@ -117,7 +117,7 @@ Output:
           "path": "string",
           "start_line": "number"
         },
-        "signals": ["heading|heading_focus|normalized|loose|exceptions"],
+        "signals": ["heading|heading_focus|normalized|loose|exceptions|late_rerank"],
         "score": "number",
         "snippet_digest": "string"
       }
@@ -163,11 +163,13 @@ Output:
 固定ルール:
 
 - `claim_graph` が統合の本体で、`summary` は `claim_graph` 由来の派生指標。
-- 一次候補の検索スコアは重み付き疎ベクトル（BM25）を基礎とし、`heading` / `exceptions` などのシグナル補正を加える。
+- 一次候補の検索スコアは重み付き疎ベクトル（BM25）を基礎とし、`heading` / `exceptions` などのシグナル補正と query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT`）を加える。
+- `LATE_RERANK_ENABLED=true` または `late_reranker` hook が設定されている場合、候補上位に late interaction rerank を適用する。
 - `include_claim_graph=true` のときのみ `claim_graph` を返す。
 - `summary.conflict_count` と `manual_hits(kind="conflicts").total` は一致する。
 - `summary.gap_count` と `manual_hits(kind="gaps").total` は一致する。
 - `expand_scope` 未指定時は `true` を適用する。
+- `CORRECTIVE_ENABLED=true` の場合、stage3 結果の品質（`gap/conflict/coverage/top-score margin/candidates`）に応じて stage4 へ昇格する。
 - `manual_id` 未指定かつ `DEFAULT_MANUAL_ID` が設定されている場合は、その `manual_id` を適用する。
 - `expand_scope` と `include_claim_graph` と `use_cache` は boolean のみ許可（非booleanは `invalid_parameter`）。
 - `use_cache` 未指定時は `SEM_CACHE_ENABLED` 設定値を適用する。

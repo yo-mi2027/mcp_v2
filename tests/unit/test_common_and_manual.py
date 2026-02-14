@@ -369,6 +369,74 @@ def test_manual_find_stage4_expands_exceptions_for_exceptional_query(state) -> N
     assert any("exceptions" in (item["ref"] or {}).get("signals", []) for item in hits["items"])
 
 
+def test_manual_find_corrective_can_trigger_stage4_when_heuristic_expand_is_off(state, monkeypatch) -> None:
+    monkeypatch.setenv("CORRECTIVE_ENABLED", "true")
+    monkeypatch.setenv("CORRECTIVE_MARGIN_MIN", "1.5")
+    local_state = create_state(Config.from_env())
+
+    monkeypatch.setattr(tools_manual_module, "_should_expand_scope", lambda **kwargs: False)
+    original = tools_manual_module._run_find_pass
+    calls = {"count": 0}
+
+    def counting_run_find_pass(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tools_manual_module, "_run_find_pass", counting_run_find_pass)
+    _ = manual_find(local_state, query="対象外", manual_id="m1", expand_scope=True)
+
+    assert calls["count"] == 2
+    lines = local_state.config.adaptive_stats_path.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[-1])
+    assert row["corrective_triggered"] is True
+    assert row["stage4_executed"] is True
+    assert "corrective_low_margin" in row["corrective_reasons"]
+
+
+def test_manual_find_applies_late_rerank_when_enabled(state, monkeypatch) -> None:
+    monkeypatch.setenv("LATE_RERANK_ENABLED", "true")
+    monkeypatch.setenv("LATE_RERANK_WEIGHT", "1.0")
+    local_state = create_state(Config.from_env())
+
+    out = manual_find(local_state, query="対象外", manual_id="m1", expand_scope=False)
+    hits = manual_hits(local_state, trace_id=out["trace_id"], kind="candidates")
+
+    assert hits["total"] >= 1
+    assert any("late_rerank" in (item["ref"] or {}).get("signals", []) for item in hits["items"])
+
+
+def test_manual_find_uses_late_reranker_hook(state) -> None:
+    manual_dir = state.config.manuals_root / "m6"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "hook.md").write_text(
+        "# 上位候補\n対象外です。\n\n# 下位候補\n対象外です。\n",
+        encoding="utf-8",
+    )
+    baseline = manual_find(state, query="対象外", manual_id="m6", expand_scope=False)
+    baseline_hits = manual_hits(state, trace_id=baseline["trace_id"], kind="candidates")
+    assert baseline_hits["total"] == 2
+    baseline_top_start = baseline_hits["items"][0]["ref"]["start_line"]
+
+    def reranker(payload: dict[str, object]) -> list[dict[str, object]]:
+        rows = payload.get("candidates")
+        assert isinstance(rows, list)
+        reversed_rows = list(reversed(rows))
+        out: list[dict[str, object]] = []
+        for idx, item in enumerate(reversed_rows):
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            if idx == 0:
+                row["score"] = 999.0
+            out.append(row)
+        return out
+
+    state.late_reranker = reranker
+    out = manual_find(state, query="対象外", manual_id="m6", expand_scope=False)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+    assert hits["items"][0]["ref"]["start_line"] != baseline_top_start
+
+
 def test_manual_find_only_unscanned_prioritizes_without_strict_filtering(state) -> None:
     initial = manual_find(state, query="対象外", manual_id="m1", budget={"max_candidates": 1})
     initial_unscanned = manual_hits(state, trace_id=initial["trace_id"], kind="unscanned")
@@ -641,6 +709,9 @@ def test_manual_find_adaptive_stats_records_sem_cache_fields_on_miss(state, monk
     assert row["scoring_mode"] == "bm25"
     assert isinstance(row["index_rebuilt"], bool)
     assert isinstance(row["index_docs"], int)
+    assert isinstance(row["corrective_triggered"], bool)
+    assert isinstance(row["corrective_reasons"], list)
+    assert isinstance(row["stage4_executed"], bool)
 
 
 def test_manual_find_adaptive_stats_records_sem_cache_hit(state, monkeypatch) -> None:
@@ -658,6 +729,9 @@ def test_manual_find_adaptive_stats_records_sem_cache_hit(state, monkeypatch) ->
     assert isinstance(row["latency_saved_ms"], int)
     assert row["latency_saved_ms"] >= 0
     assert row["scoring_mode"] == "cache"
+    assert isinstance(row["corrective_triggered"], bool)
+    assert isinstance(row["corrective_reasons"], list)
+    assert isinstance(row["stage4_executed"], bool)
 
 
 def test_manual_find_uses_default_manual_id_when_omitted(state, monkeypatch) -> None:
@@ -698,6 +772,28 @@ def test_config_default_adaptive_stats_path_under_system(tmp_path, monkeypatch) 
     monkeypatch.delenv("ADAPTIVE_STATS_PATH", raising=False)
     cfg = Config.from_env()
     assert cfg.adaptive_stats_path == (cfg.vault_root / ".system" / "adaptive_stats.jsonl")
+
+
+def test_config_corrective_defaults(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("MANUALS_ROOT", raising=False)
+    monkeypatch.delenv("VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CORRECTIVE_ENABLED", raising=False)
+    monkeypatch.delenv("CORRECTIVE_COVERAGE_MIN", raising=False)
+    monkeypatch.delenv("CORRECTIVE_MARGIN_MIN", raising=False)
+    monkeypatch.delenv("CORRECTIVE_MIN_CANDIDATES", raising=False)
+    monkeypatch.delenv("CORRECTIVE_ON_CONFLICT", raising=False)
+
+    cfg = Config.from_env()
+    assert cfg.corrective_enabled is False
+    assert cfg.corrective_coverage_min == 0.90
+    assert cfg.corrective_margin_min == 0.15
+    assert cfg.corrective_min_candidates == 3
+    assert cfg.corrective_on_conflict is True
+    assert cfg.sparse_query_coverage_weight == 0.35
+    assert cfg.late_rerank_enabled is False
+    assert cfg.late_rerank_top_n == 50
+    assert cfg.late_rerank_weight == 0.60
 
 
 def test_adaptive_thresholds_rollback_on_recall_drop(tmp_path) -> None:

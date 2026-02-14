@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp_v2_server.config import Config
-from mcp_v2_server.eval_manual_find import (
+from mcp_v2_eval.eval_manual_find import (
     DEFAULT_BUDGET_MAX_CANDIDATES,
     DEFAULT_BUDGET_TIME_MS,
     build_eval_report,
@@ -42,6 +42,11 @@ def _parse_args() -> argparse.Namespace:
         "--compare-sem-cache",
         action="store_true",
         help="Run two evaluations (SEM_CACHE off/on) and emit a comparison report.",
+    )
+    parser.add_argument(
+        "--compare-late-rerank",
+        action="store_true",
+        help="Run two evaluations (late rerank off/on) and emit a comparison report.",
     )
     return parser.parse_args()
 
@@ -124,6 +129,9 @@ def main() -> int:
     include_claim_graph = bool(args.include_claim_graph)
     budget_time_ms = int(args.budget_time_ms)
     budget_max_candidates = int(args.budget_max_candidates)
+    if args.compare_sem_cache and args.compare_late_rerank:
+        print("choose either --compare-sem-cache or --compare-late-rerank", file=sys.stderr)
+        return 2
 
     if args.compare_sem_cache:
         baseline_report = _run_once(
@@ -162,6 +170,44 @@ def main() -> int:
                 f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
             },
         }
+    elif args.compare_late_rerank:
+        baseline_report = _run_once(
+            cfg=replace(base_cfg, late_rerank_enabled=False),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        rerank_report = _run_once(
+            cfg=replace(base_cfg, late_rerank_enabled=True),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        delta = _metric_delta(baseline_report["metrics"], rerank_report["metrics"])
+        report = {
+            "mode": "late_rerank_compare",
+            "baseline": baseline_report,
+            "with_late_rerank": rerank_report,
+            "metrics_delta": delta,
+            "comparison_summary": {
+                "baseline_passed": bool(baseline_report["pass_fail"]["all_passed"]),
+                "with_late_rerank_passed": bool(rerank_report["pass_fail"]["all_passed"]),
+                "p95_latency_ms_delta": delta.get("p95_latency_ms"),
+                "tokens_per_query_delta": delta.get("tokens_per_query"),
+                f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
+                f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
+            },
+        }
     else:
         report = _run_once(
             cfg=base_cfg,
@@ -176,7 +222,7 @@ def main() -> int:
         )
 
     dated_path, latest_path = write_eval_report(report, out_dir)
-    if args.compare_sem_cache:
+    if args.compare_sem_cache or args.compare_late_rerank:
         print(json.dumps(report["comparison_summary"], ensure_ascii=False, indent=2))
     else:
         print(json.dumps({"metrics": report["metrics"], "pass_fail": report["pass_fail"]}, ensure_ascii=False, indent=2))
@@ -188,6 +234,11 @@ def main() -> int:
             baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
             sem_cache_pass = bool(report["with_sem_cache"]["pass_fail"]["all_passed"])
             if not (baseline_pass and sem_cache_pass):
+                return 1
+        elif args.compare_late_rerank:
+            baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
+            rerank_pass = bool(report["with_late_rerank"]["pass_fail"]["all_passed"])
+            if not (baseline_pass and rerank_pass):
                 return 1
         elif not report["pass_fail"]["all_passed"]:
             return 1
