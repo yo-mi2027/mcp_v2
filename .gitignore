@@ -24,3 +24,6 @@ __pycache__/
 
 # OS/editor noise
 .DS_Store
+
+# Local eval env file
+.env.eval_hybrid

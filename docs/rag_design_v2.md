@@ -1,6 +1,6 @@
 # RAG設計書 v2（現行実装ベース）
 
-最終更新: 2026-02-14
+最終更新: 2026-02-20
 
 本書は `manual_find` を中心にした探索設計の説明資料である。  
 入出力の正本契約は `spec_manuals.md` を参照。
@@ -15,7 +15,9 @@
 
 1. 入力検証
 - `query` 必須
-- `expand_scope` は boolean（未指定時 `true`）
+- `manual_id` は必須。
+- `expand_scope` は boolean 入力のみ許可（未指定は `null` 扱い）。
+- `required_terms` は省略可。指定時は文字列配列（最大2語）を受理。
 - `budget.time_ms` / `budget.max_candidates` は整数かつ `>= 1`
 
 2. Semantic Cache 照合（有効時）
@@ -23,20 +25,26 @@
 - `exact` -> `semantic` の順で照合
 - hit 時は保存済み `trace_payload` から新規 `trace_id` を発行して返却
 - `manual_id` / `expand_scope` / `budget` / `manuals_fingerprint` でスコープ分離
+- `stage_cap` を含む結果も同一スコープで cache 再利用対象にする
 
 3. 候補抽出（cache miss 時）
 - 対象 manual 群を決定
 - `.md` は見出しノード単位、`.json` はファイル単位で走査
-- シグナル（`heading`, `normalized`, `loose`, `exceptions`）を評価
-- BM25 を基礎に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT`）を加点
+- `required_terms` 指定時は候補採用条件に必須語一致を統合し、2語時は `A` / `B` / `A+B` の3pass結果をRRF統合
+- lexical シグナル（`exact/phrase/anchor/number_context/proximity/code_exact/prf/exceptions`）を評価
+- BM25 を基礎に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT` / `LEXICAL_COVERAGE_WEIGHT`）を加点
+- Query Decomposition + RRF（`MANUAL_FIND_QUERY_DECOMP_ENABLED`）は既定ON。比較構文に一致した場合のみ sub-query 分解を実行し、部分失敗は許容して継続する。結合時は `base` と `rrf` を正規化混合（`MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT`）して再スコアする
 - `LATE_RERANK_ENABLED=true` または `late_reranker` hook 指定時は候補上位へ late interaction rerank を適用
-- 厳密一致シグナル（`heading|normalized|loose`）がある候補のみ採用（`exceptions` 単独では採用しない）
+- 最終ランキングで同一 `path` の過度な集中を抑える多様性リランキングを適用
+- 探索中の `candidate_cap` は `min(MANUAL_FIND_SCAN_HARD_CAP, max(50, budget.max_candidates*20))` で制御
+- 返却直前に動的カットオフを適用し、返却候補上限は `min(budget.max_candidates, 50)`（さらに score/coverage 条件で縮小）
+- lexical 一致がある候補のみ採用（`exceptions` 単独では採用しない）
 
 4. 必要時の拡張
-- `expand_scope=true` の場合、条件に応じて探索スコープを拡張
-- クエリ語彙と候補分布をもとに例外語彙中心の補助パスを段階実行
+- `expand_scope=true` かつ必要判定時は、隣接 manual へ限定した stage4 を実行する
+- `CORRECTIVE_ENABLED=true` の場合は、ギャップ/競合などの条件で限定 stage4 昇格を行う
 - `only_unscanned_from_trace_id` 指定時は未探索セクションを優先
-- `CORRECTIVE_ENABLED=true` の場合、stage3 品質（gap/conflict/coverage/top-score margin/candidates）で stage4 昇格を判定
+- stage4 実行不可時は `stage_cap` を記録し、未探索候補を `unscanned` に積む
 
 5. 統合判断
 - 候補から `claim_graph`（claims/evidences/edges/facets）を構築
@@ -75,7 +83,8 @@
 - `manual_hits` は `offset >= 0`, `limit >= 1`
 - `manual_scan` は `max_chars=12000` 固定で `next_cursor.char_offset` による継続取得を行う
 - `start_line` は対象行数の範囲内
-- 不正な数値は `invalid_parameter`
+- 不正な数値（`true/false` 含む）は `invalid_parameter`
+- `manual_find` は `cutoff_reason` として `time_budget|candidate_cap|dynamic_cutoff|stage_cap` を取りうる
 
 ## 6. 観測項目（`ADAPTIVE_STATS_PATH`）
 
@@ -85,6 +94,7 @@
 - `latency_saved_ms`: cache hit 時の推定短縮時間（ms）
 - `corrective_triggered`: Corrective 判定が発火したか
 - `stage4_executed`: stage4 の拡張探索を実行したか
+- `scoring_mode`: `lexical|query_decomp_rrf|cache`
 
 ## 7. 非対象（本書）
 

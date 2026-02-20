@@ -8,6 +8,7 @@ from mcp_v2_server.app import _execute
 from mcp_v2_server.errors import ToolError
 from mcp_v2_server.tools_vault import (
     vault_create,
+    vault_ls,
     vault_read,
     vault_replace,
     vault_scan,
@@ -43,6 +44,12 @@ def test_vault_read_rejects_non_boolean_full(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
+def test_vault_read_rejects_non_string_path(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_read(state, path=123, full=False, range={"start_line": 1, "end_line": 2})  # type: ignore[arg-type]
+    assert e.value.code == "invalid_path"
+
+
 def test_daily_file_forbids_overwrite_and_replace(state) -> None:
     vault_create(state, path="daily/2026-02-06.md", content="first\n")
     with pytest.raises(ToolError) as e2:
@@ -68,9 +75,27 @@ def test_vault_create_requires_non_empty_content(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
+def test_vault_create_rejects_non_string_content(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_create(state, path="project-a/out.md", content=123)  # type: ignore[arg-type]
+    assert e.value.code == "invalid_parameter"
+
+
 def test_vault_replace_rejects_non_integer_max_replacements(state) -> None:
     with pytest.raises(ToolError) as e:
         vault_replace(state, path="source.md", find="line", replace="x", max_replacements="abc")
+    assert e.value.code == "invalid_parameter"
+
+
+def test_vault_replace_rejects_boolean_max_replacements(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_replace(state, path="source.md", find="line", replace="x", max_replacements=True)
+    assert e.value.code == "invalid_parameter"
+
+
+def test_vault_replace_rejects_non_string_find(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_replace(state, path="source.md", find=123, replace="x")  # type: ignore[arg-type]
     assert e.value.code == "invalid_parameter"
 
 
@@ -122,7 +147,66 @@ def test_vault_scan_rejects_non_object_cursor(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
+def test_vault_ls_lists_root_when_path_omitted(state) -> None:
+    (state.config.vault_root / "daily").mkdir(parents=True, exist_ok=True)
+    (state.config.vault_root / ".system").mkdir(parents=True, exist_ok=True)
+    out = vault_ls(state)
+    assert out["base_path"] is None
+    assert out["items"] == [
+        {"name": ".system", "path": ".system", "kind": "dir"},
+        {"name": "daily", "path": "daily", "kind": "dir"},
+        {"name": "notes.md", "path": "notes.md", "kind": "file"},
+        {"name": "report.md", "path": "report.md", "kind": "file"},
+        {"name": "source.md", "path": "source.md", "kind": "file"},
+    ]
+
+
+def test_vault_ls_lists_directory_when_path_is_provided(state) -> None:
+    (state.config.vault_root / "project-a").mkdir(parents=True, exist_ok=True)
+    (state.config.vault_root / "project-a" / "todo.md").write_text("x", encoding="utf-8")
+
+    out = vault_ls(state, path="project-a")
+    assert out["base_path"] == "project-a"
+    assert out["items"] == [{"name": "todo.md", "path": "project-a/todo.md", "kind": "file"}]
+
+
+def test_vault_ls_filters_os_noise_files(state) -> None:
+    (state.config.vault_root / ".system").mkdir(parents=True, exist_ok=True)
+    (state.config.vault_root / ".DS_Store").write_text("x", encoding="utf-8")
+    (state.config.vault_root / "Thumbs.db").write_text("x", encoding="utf-8")
+    (state.config.vault_root / "._notes.md").write_text("x", encoding="utf-8")
+    out = vault_ls(state)
+    names = {item["name"] for item in out["items"]}
+    assert ".DS_Store" not in names
+    assert "Thumbs.db" not in names
+    assert "._notes.md" not in names
+    assert ".system" in names
+
+
+def test_vault_ls_rejects_file_path(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_ls(state, path="source.md")
+    assert e.value.code == "not_found"
+
+
+def test_vault_ls_rejects_non_string_path(state) -> None:
+    with pytest.raises(ToolError) as e:
+        vault_ls(state, path=123)  # type: ignore[arg-type]
+    assert e.value.code == "invalid_path"
+
+
 def test_execute_logs_vault_extension_fields(state, capsys) -> None:
+    _execute(
+        state,
+        "vault_ls",
+        lambda *, path: {"items": [{"name": "x", "path": "x", "kind": "file"}]},
+        path=None,
+    )
+    _execute(
+        state,
+        "manual_ls",
+        lambda: {"id": "manuals", "items": [{"id": "m1", "name": "m1", "kind": "dir"}]},
+    )
     _execute(
         state,
         "vault_read",
@@ -152,20 +236,58 @@ def test_execute_logs_vault_extension_fields(state, capsys) -> None:
         path="rules.md",
     )
     lines = capsys.readouterr().err.strip().splitlines()
-    payloads = [json.loads(line) for line in lines[-4:]]
+    payloads = [json.loads(line) for line in lines[-6:]]
 
-    assert payloads[0]["tool"] == "vault_read"
-    assert payloads[0]["path"] == "notes.md"
-    assert payloads[0]["truncated"] is True
+    assert payloads[0]["tool"] == "vault_ls"
+    assert payloads[0]["path"] is None
+    assert payloads[0]["items"] == 1
 
-    assert payloads[1]["tool"] == "vault_create"
-    assert payloads[1]["written_bytes"] == 10
+    assert payloads[1]["tool"] == "manual_ls"
 
-    assert payloads[2]["tool"] == "vault_scan"
-    assert payloads[2]["path"] == "source.md"
-    assert payloads[2]["truncated_reason"] == "chunk_end"
+    assert payloads[2]["tool"] == "vault_read"
+    assert payloads[2]["path"] == "notes.md"
+    assert payloads[2]["truncated"] is True
 
-    assert payloads[3]["tool"] == "manual_scan"
-    assert payloads[3]["manual_id"] == "m1"
-    assert payloads[3]["path"] == "rules.md"
-    assert payloads[3]["truncated_reason"] == "chunk_end"
+    assert payloads[3]["tool"] == "vault_create"
+    assert payloads[3]["written_bytes"] == 10
+
+    assert payloads[4]["tool"] == "vault_scan"
+    assert payloads[4]["path"] == "source.md"
+    assert payloads[4]["truncated_reason"] == "chunk_end"
+
+    assert payloads[5]["tool"] == "manual_scan"
+    assert payloads[5]["manual_id"] == "m1"
+    assert payloads[5]["path"] == "rules.md"
+    assert payloads[5]["truncated_reason"] == "chunk_end"
+
+
+def test_execute_requires_manual_ls_before_manual_tools(state) -> None:
+    out = _execute(
+        state,
+        "manual_scan",
+        lambda *, manual_id, path: {"manual_id": manual_id, "path": path},
+        manual_id="m1",
+        path="rules.md",
+    )
+    assert out["code"] == "invalid_parameter"
+    assert out["details"] == {"required_first_call": "manual_ls"}
+
+    _execute(state, "manual_ls", lambda: {"id": "manuals", "items": []})
+    ok = _execute(
+        state,
+        "manual_scan",
+        lambda *, manual_id, path: {"manual_id": manual_id, "path": path},
+        manual_id="m1",
+        path="rules.md",
+    )
+    assert ok["manual_id"] == "m1"
+
+
+def test_execute_allows_vault_tools_without_vault_ls(state) -> None:
+    out = _execute(
+        state,
+        "vault_read",
+        lambda *, path: {"path": path},
+        path="source.md",
+    )
+    assert out["path"] == "source.md"

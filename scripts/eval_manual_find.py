@@ -30,9 +30,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--budget-max-candidates", type=int, default=DEFAULT_BUDGET_MAX_CANDIDATES)
     parser.add_argument("--max-cases", type=int, default=0, help="Run only first N cases (0 means all)")
     parser.add_argument("--include-claim-graph", action="store_true")
-    parser.add_argument("--no-expand-scope", action="store_true")
     parser.add_argument("--enforce-thresholds", action="store_true", help="Exit 1 when thresholds fail")
     parser.add_argument("--hit-rate-min", type=float, default=None)
+    parser.add_argument("--recall-min", type=float, default=None)
+    parser.add_argument("--mrr-min", type=float, default=None)
     parser.add_argument("--precision-min", type=float, default=None)
     parser.add_argument("--gap-rate-max", type=float, default=None)
     parser.add_argument("--conflict-rate-max", type=float, default=None)
@@ -48,14 +49,25 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run two evaluations (late rerank off/on) and emit a comparison report.",
     )
+    parser.add_argument(
+        "--compare-query-decomp",
+        action="store_true",
+        help="Run two evaluations (query decomposition + RRF off/on) and emit a comparison report.",
+    )
     return parser.parse_args()
 
 
 def _apply_threshold_overrides(thresholds: dict[str, dict[str, Any]], args: argparse.Namespace, top_k: int) -> None:
     hit_key = f"hit_rate@{top_k}"
+    recall_key = f"recall@{top_k}"
+    mrr_key = f"mrr@{top_k}"
     precision_key = f"precision@{top_k}"
     if args.hit_rate_min is not None:
         thresholds[hit_key] = {"op": ">=", "value": float(args.hit_rate_min)}
+    if args.recall_min is not None:
+        thresholds[recall_key] = {"op": ">=", "value": float(args.recall_min)}
+    if args.mrr_min is not None:
+        thresholds[mrr_key] = {"op": ">=", "value": float(args.mrr_min)}
     if args.precision_min is not None:
         thresholds[precision_key] = {"op": ">=", "value": float(args.precision_min)}
     if args.gap_rate_max is not None:
@@ -125,12 +137,17 @@ def main() -> int:
         cases = cases[: args.max_cases]
 
     base_cfg = Config.from_env()
-    expand_scope = not args.no_expand_scope
+    expand_scope = True
     include_claim_graph = bool(args.include_claim_graph)
     budget_time_ms = int(args.budget_time_ms)
     budget_max_candidates = int(args.budget_max_candidates)
-    if args.compare_sem_cache and args.compare_late_rerank:
-        print("choose either --compare-sem-cache or --compare-late-rerank", file=sys.stderr)
+    compare_count = (
+        int(bool(args.compare_sem_cache))
+        + int(bool(args.compare_late_rerank))
+        + int(bool(args.compare_query_decomp))
+    )
+    if compare_count > 1:
+        print("choose only one compare mode", file=sys.stderr)
         return 2
 
     if args.compare_sem_cache:
@@ -167,6 +184,8 @@ def main() -> int:
                 "with_sem_cache_passed": bool(sem_cache_report["pass_fail"]["all_passed"]),
                 "p95_latency_ms_delta": delta.get("p95_latency_ms"),
                 f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
+                f"recall@{top_k}_delta": delta.get(f"recall@{top_k}"),
+                f"mrr@{top_k}_delta": delta.get(f"mrr@{top_k}"),
                 f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
             },
         }
@@ -205,6 +224,48 @@ def main() -> int:
                 "p95_latency_ms_delta": delta.get("p95_latency_ms"),
                 "tokens_per_query_delta": delta.get("tokens_per_query"),
                 f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
+                f"recall@{top_k}_delta": delta.get(f"recall@{top_k}"),
+                f"mrr@{top_k}_delta": delta.get(f"mrr@{top_k}"),
+                f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
+            },
+        }
+    elif args.compare_query_decomp:
+        baseline_report = _run_once(
+            cfg=replace(base_cfg, manual_find_query_decomp_enabled=False),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        query_decomp_report = _run_once(
+            cfg=replace(base_cfg, manual_find_query_decomp_enabled=True),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        delta = _metric_delta(baseline_report["metrics"], query_decomp_report["metrics"])
+        report = {
+            "mode": "query_decomp_compare",
+            "baseline": baseline_report,
+            "with_query_decomp": query_decomp_report,
+            "metrics_delta": delta,
+            "comparison_summary": {
+                "baseline_passed": bool(baseline_report["pass_fail"]["all_passed"]),
+                "with_query_decomp_passed": bool(query_decomp_report["pass_fail"]["all_passed"]),
+                "p95_latency_ms_delta": delta.get("p95_latency_ms"),
+                "tokens_per_query_delta": delta.get("tokens_per_query"),
+                f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
+                f"recall@{top_k}_delta": delta.get(f"recall@{top_k}"),
+                f"mrr@{top_k}_delta": delta.get(f"mrr@{top_k}"),
                 f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
             },
         }
@@ -222,7 +283,7 @@ def main() -> int:
         )
 
     dated_path, latest_path = write_eval_report(report, out_dir)
-    if args.compare_sem_cache or args.compare_late_rerank:
+    if args.compare_sem_cache or args.compare_late_rerank or args.compare_query_decomp:
         print(json.dumps(report["comparison_summary"], ensure_ascii=False, indent=2))
     else:
         print(json.dumps({"metrics": report["metrics"], "pass_fail": report["pass_fail"]}, ensure_ascii=False, indent=2))
@@ -239,6 +300,11 @@ def main() -> int:
             baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
             rerank_pass = bool(report["with_late_rerank"]["pass_fail"]["all_passed"])
             if not (baseline_pass and rerank_pass):
+                return 1
+        elif args.compare_query_decomp:
+            baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
+            query_decomp_pass = bool(report["with_query_decomp"]["pass_fail"]["all_passed"])
+            if not (baseline_pass and query_decomp_pass):
                 return 1
         elif not report["pass_fail"]["all_passed"]:
             return 1

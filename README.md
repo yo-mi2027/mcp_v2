@@ -1,7 +1,7 @@
 # mcp_v2
 
 `mcp_v2` は、manual と vault を扱う FastMCP サーバーです。  
-現行の公開ツールは次の10個です。
+現行の公開ツールは次の11個です。
 
 - `manual_ls`
 - `manual_toc`
@@ -9,6 +9,7 @@
 - `manual_hits`
 - `manual_read`
 - `manual_scan`
+- `vault_ls`
 - `vault_create`
 - `vault_read`
 - `vault_scan`
@@ -139,8 +140,9 @@ MCPクライアントから次を順に呼び出してください。
 
 1. `manual_ls({ id: "manuals" })` で manual 一覧を取得
 2. 返ってきた `dir` の `id` を `manual_ls` に渡して、1階層ずつ辿る
-3. 必要な manual を `manual_toc` / `manual_find` で読む
+3. `manual_toc` は既定 `depth=shallow` で構造把握し、必要時のみ `depth=deep` と `path_prefix` で見出し取得
 4. `manual_find` の結果 `trace_id` を `manual_hits` に渡す
+5. vault は必要に応じて `vault_ls({ path: null })` で探索してから、`vault_read` / `vault_scan` / `vault_create` / `vault_replace` を呼ぶ
 
 これで「一覧 -> 検索 -> 詳細取得」の一連動作を確認できます。
 
@@ -179,6 +181,27 @@ pip install -r requirements.txt
 - `command` が実在する Python 実行ファイルを指しているか
 - `args` が `-m mcp_v2_server.app --stdio` になっているか
 - クライアント再起動後に反映されるか
+
+### 4) `manual_toc` で `needs_narrow_scope` が返る
+
+症状:
+
+- `toc scope too large` / `needs_narrow_scope` が返る
+
+対処:
+
+- `path_prefix` を指定して対象ファイルを絞ってください。
+- `path_prefix` が空の場合は `max_files <= 50` を守ってください。
+
+### 5) 数値パラメータに `true` / `false` を渡して `invalid_parameter` になる
+
+症状:
+
+- `offset` / `limit` / `budget.*` / `max_replacements` などで `invalid_parameter` が返る
+
+対処:
+
+- `true` / `false` ではなく整数値を渡してください。
 
 ## 10. テスト実行
 
@@ -247,6 +270,17 @@ python scripts/eval_manual_find.py --compare-late-rerank
 - `LATE_RERANK_ENABLED=false`（baseline）
 - `LATE_RERANK_ENABLED=true`（with_late_rerank）
 
+Query decomposition + RRF の有無を比較する場合:
+
+```bash
+python scripts/eval_manual_find.py --compare-query-decomp
+```
+
+比較モードでは次を同一条件で2回実行します。
+
+- `MANUAL_FIND_QUERY_DECOMP_ENABLED=false`（baseline）
+- `MANUAL_FIND_QUERY_DECOMP_ENABLED=true`（with_query_decomp）
+
 ## 12. ディレクトリ構成
 
 - `manuals/<manual_id>/`
@@ -268,7 +302,6 @@ python scripts/eval_manual_find.py --compare-late-rerank
 - `WORKSPACE_ROOT` (default: `.`)
 - `MANUALS_ROOT` (default: `${WORKSPACE_ROOT}/manuals`)
 - `VAULT_ROOT` (default: `${WORKSPACE_ROOT}/vault`)
-- `DEFAULT_MANUAL_ID` (default: `null`)
 - `LOG_LEVEL` (default: `info`)
 - `ADAPTIVE_TUNING` (default: `true`)
 - `ADAPTIVE_STATS_PATH` (default: `${VAULT_ROOT}/.system/adaptive_stats.jsonl`)
@@ -283,6 +316,27 @@ python scripts/eval_manual_find.py --compare-late-rerank
 - `CORRECTIVE_MIN_CANDIDATES` (default: `3`)
 - `CORRECTIVE_ON_CONFLICT` (default: `true`)
 - `SPARSE_QUERY_COVERAGE_WEIGHT` (default: `0.35`)
+- `LEXICAL_COVERAGE_WEIGHT` (default: `0.50`)
+- `LEXICAL_PHRASE_WEIGHT` (default: `0.50`)
+- `LEXICAL_NUMBER_CONTEXT_BONUS` (default: `0.80`)
+- `LEXICAL_PROXIMITY_BONUS_NEAR` (default: `1.00`)
+- `LEXICAL_PROXIMITY_BONUS_FAR` (default: `0.50`)
+- `LEXICAL_LENGTH_PENALTY_WEIGHT` (default: `0.20`)
+- `MANUAL_FIND_EXPLORATION_ENABLED` (default: `true`)
+- `MANUAL_FIND_EXPLORATION_RATIO` (default: `0.20`)
+- `MANUAL_FIND_EXPLORATION_MIN_CANDIDATES` (default: `2`)
+- `MANUAL_FIND_EXPLORATION_SCORE_SCALE` (default: `0.35`)
+- `MANUAL_FIND_STAGE4_ENABLED` (default: `true`)
+- `MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT` (default: `2`)
+- `MANUAL_FIND_STAGE4_BUDGET_TIME_MS` (default: `15000`)
+- `MANUAL_FIND_STAGE4_SCORE_PENALTY` (default: `0.15`)
+- `MANUAL_FIND_QUERY_DECOMP_ENABLED` (default: `true`)
+- `MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES` (default: `3`)
+- `MANUAL_FIND_QUERY_DECOMP_RRF_K` (default: `60`)
+- `MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT` (default: `0.30`, `0.0` でRRF寄り、`1.0` でbase寄り)
+- `MANUAL_FIND_SCAN_HARD_CAP` (default: `5000`)
+- `MANUAL_FIND_PER_FILE_CANDIDATE_CAP` (default: `8`)
+- `MANUAL_FIND_FILE_PRESCAN_ENABLED` (default: `true`)
 - `LATE_RERANK_ENABLED` (default: `false`)
 - `LATE_RERANK_TOP_N` (default: `50`)
 - `LATE_RERANK_WEIGHT` (default: `0.60`)

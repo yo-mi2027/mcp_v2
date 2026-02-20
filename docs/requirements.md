@@ -1,6 +1,6 @@
 # 統合MCPサーバ v2 要件定義（現行運用版）
 
-最終更新: 2026-02-13
+最終更新: 2026-02-19
 
 本書は現行実装の要件を運用向けに整理した文書である。  
 入出力の正本契約は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を優先する。
@@ -14,7 +14,7 @@
 
 ## 2. 現行公開スコープ
 
-公開ツールは次の10個のみ:
+公開ツールは次の11個のみ:
 
 - `manual_ls`
 - `manual_toc`
@@ -22,6 +22,7 @@
 - `manual_hits`
 - `manual_read`
 - `manual_scan`
+- `vault_ls`
 - `vault_create`
 - `vault_read`
 - `vault_scan`
@@ -31,7 +32,6 @@
 
 - `manual_list`
 - `manual_excepts`
-- `vault_ls`
 - `vault_find`
 - `vault_write`
 - `vault_search`
@@ -44,17 +44,21 @@
 
 ### 3.1 Manual探索
 
-- `manual_find` は複数シグナル（見出し一致、正規化一致、loose一致、例外語彙）を統合して候補化する。
-- 一次候補のスコアリングは BM25 に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT`）を加える。
+- `manual_find` は lexical-only（語彙一致）で候補化する。
+- 一次候補のスコアリングは `idf × tf` を基礎とし、coverage/phrase/number-context/proximity の加点とノイズ減点で再ランキングする。
+- lexical係数（coverage/phrase/number-context/proximity/length-penalty）は環境変数で調整可能とする。
+- `MANUAL_FIND_EXPLORATION_*` により、探索バケット（低prior候補）を混在させて recall を底上げする。
 - `LATE_RERANK_ENABLED=true` の場合、候補上位へ late interaction rerank を適用する。
 - 結果は `trace_id` を中心に返し、詳細は `manual_hits` で段階取得できる。
+- `manual_hits(kind="candidates")` は `matched_tokens` / `token_hits` / `match_coverage` / `rank_explain` を返せる。
 - 統合判断として `claim_graph` を内部生成し、要約として `summary` と `next_actions` を返す。
-- `expand_scope` は boolean。`true` では必要時に探索拡張を行う。
-- `manual_id` 未指定かつ `DEFAULT_MANUAL_ID` が設定されている場合は、その manual を探索対象にする。
+- `manual_id` は必須（未指定/空文字は `invalid_parameter`）。
+- `expand_scope` は boolean 入力のみ許可し、`true` かつ必要時は `MANUAL_FIND_STAGE4_*` 制約で限定stage4を実行する。
 - `SEM_CACHE_ENABLED=true` の場合、`manual_find` は `exact` -> `semantic` の順で cache lookup を行う。
 - cache key は `manual_id` / `expand_scope` / `budget` / `manuals_fingerprint` で分離し、manual更新時は自動無効化する。
+- `manual_toc` は対象ファイル数が 200 件を超える場合に `needs_narrow_scope` を返し、`path_prefix` の絞り込みを要求する。
 - `only_unscanned_from_trace_id` 指定時は cache をバイパスし、未探索優先フローを維持する。
-- `CORRECTIVE_ENABLED=true` の場合、stage3 結果の品質が閾値未達なら stage4 へ昇格する（`CORRECTIVE_*` で調整）。
+- `CORRECTIVE_ENABLED=true` かつ `expand_scope=true` では、必要時に限定stage4昇格を実行する。
 
 ### 3.2 Manual本文取得
 
@@ -64,6 +68,7 @@
 
 ### 3.3 Vault操作
 
+- `vault_ls` は非再帰の1階層一覧を返す（`path` 未指定時はルート）。
 - `vault_create` は新規作成専用（既存ファイルは `conflict`）。
 - `vault_read` は範囲読みを基本とし、必要時のみ `full=true`。
 - `vault_scan` は行単位の逐次取得を提供する。
@@ -74,13 +79,15 @@
 - 評価は `manual_find` を中心とし、取得品質（retrieval）と統合品質（integration）を分離して測定する。
 - 評価データセットは少なくとも次を持つ:
   - `query`
-  - `manual_id`（任意）
+  - `manual_id`（必須）
   - `expected_paths`（期待される根拠パス群）
   - `forbidden_paths`（誤検知として扱うパス群、任意）
 - 評価実行は `manual_find` -> `manual_hits(kind="candidates")` を基本導線とする。
 - 比較評価では `SEM_CACHE_ENABLED=false/true` の2条件を同一データセット・同一設定で実行し、差分を比較する。
 - 評価指標は少なくとも次を算出する:
   - `hit_rate@k`（`expected_paths` が上位k件に含まれる割合）
+  - `recall@k`（`expected_paths` の回収率）
+  - `mrr@k`（最初の正解ヒット順位の逆数平均）
   - `precision@k`（上位k件の適合率）
   - `gap_rate`（`summary.gap_count > 0` の割合）
   - `conflict_rate`（`summary.conflict_count > 0` の割合）
@@ -99,6 +106,7 @@
 ## 5. 入力バリデーション要件
 
 - 整数型パラメータに非整数を渡した場合は `invalid_parameter` を返す。
+- 整数型パラメータに `true/false` を渡した場合も `invalid_parameter` を返す。
 - 下限/上限違反も `invalid_parameter` を返す。
 - 実装内部の変換失敗を `conflict` にフォールバックしない。
 
@@ -121,7 +129,7 @@
 - ツール呼び出しログは JSONL で stderr に出力する。
 - `manual_find` の軽量統計は `ADAPTIVE_STATS_PATH` に永続化する。
 - 統計には本文を保存しない（メタ情報のみ）。
-- `manual_find` 統計には少なくとも `sem_cache_hit`, `sem_cache_mode`, `sem_cache_score`, `latency_saved_ms` を含める。
+- `manual_find` 統計には少なくとも `sem_cache_hit`, `sem_cache_mode`, `sem_cache_score`, `latency_saved_ms`, `scoring_mode` を含める。
 - Eval実行結果は再現可能な形式（JSON/JSONL）で保存し、比較可能なサマリを生成する。
 - Eval結果には少なくとも次を含める: 実行日時、評価データセットID（またはハッシュ）、指標値、しきい値判定結果。
 
@@ -141,6 +149,8 @@
 - 主要指標の暫定閾値（例: `hit_rate@5`, `gap_rate`）が明記され、変更時にレビュー対象となること。
 - 初期閾値は次を採用する:
   - `hit_rate@5 >= 0.80`
+  - `recall@5 >= 0.80`
+  - `mrr@5 >= 0.60`
   - `precision@5 >= 0.50`
   - `gap_rate <= 0.25`
   - `conflict_rate <= 0.20`
@@ -154,7 +164,7 @@
 - 初期配分は `definition/procedure/eligibility/exceptions/compare/unknown` を各 `5問` 目安とする。
 - ゴールド正解は `path` 単位で定義し、`start_line` は参考情報（非ゲート）として扱う。
 - 評価時の `manual_find` 実行条件は次で固定する:
-  - `expand_scope=true`
+  - `expand_scope=true`（限定stage4動作を含めて評価する）
   - `include_claim_graph=false`
   - `budget.time_ms=60000`
   - `budget.max_candidates=200`
@@ -177,3 +187,7 @@
 
 - 本書は運用要件をまとめたガイドであり、I/O契約の唯一の正本ではない。
 - 仕様差分がある場合は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を優先する。
+
+## 11. 改訂提案（参考）
+
+- `manual_find` の lexical-only 再設計案（未実装）: `docs/proposals/manual_find_lexical_rebuild.md`

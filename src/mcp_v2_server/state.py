@@ -25,6 +25,9 @@ class AppState:
     semantic_cache: SemanticCache
     sparse_index: SparseIndexStore
     read_progress: dict[str, dict[str, int | None]] = field(default_factory=dict)
+    manual_ls_root_pending: bool = False
+    manual_root_ids: set[str] = field(default_factory=set)
+    manual_ls_seen: bool = False
     next_actions_planner: Callable[[dict[str, Any]], Any] | None = None
     late_reranker: Callable[[dict[str, Any]], Any] | None = None
 

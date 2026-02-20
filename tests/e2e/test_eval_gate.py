@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from mcp_v2_eval.eval_manual_find import evaluate_manual_find
+from pathlib import Path
+
+from mcp_v2_eval.eval_manual_find import build_eval_report, evaluate_manual_find
 
 
 def _sample_cases() -> list[dict[str, object]]:
@@ -44,6 +46,8 @@ def test_eval_gate_passes_with_reasonable_thresholds(state) -> None:
     out = evaluate_manual_find(state, _sample_cases(), top_k=1, thresholds=thresholds)
     assert out["pass_fail"]["all_passed"] is True
     assert out["metrics"]["error_rate"] == 0.0
+    assert "recall@1" in out["metrics"]
+    assert "mrr@1" in out["metrics"]
     assert "tokens_per_query" in out["metrics"]
 
 
@@ -54,3 +58,24 @@ def test_eval_gate_detects_failure(state) -> None:
     out = evaluate_manual_find(state, _sample_cases(), top_k=5, thresholds=thresholds)
     assert out["pass_fail"]["all_passed"] is False
     assert any(check["metric"] == "hit_rate@5" and check["passed"] is False for check in out["pass_fail"]["checks"])
+
+
+def test_eval_gate_reports_expand_scope_application(state) -> None:
+    out = evaluate_manual_find(state, _sample_cases(), top_k=1)
+    assert out["cases"]
+    first = out["cases"][0]
+    assert first["requested_expand_scope"] is True
+    assert isinstance(first["applied_expand_scope"], bool)
+
+    report = build_eval_report(
+        Path("evals/manual_find_gold.jsonl"),
+        results=out,
+        top_k=1,
+        expand_scope=True,
+        include_claim_graph=False,
+        budget_time_ms=60000,
+        budget_max_candidates=200,
+    )
+    find_options = report["find_options"]
+    assert find_options["requested_expand_scope"] is True
+    assert isinstance(find_options["applied_expand_scope"], bool)

@@ -14,6 +14,7 @@ from .path_guard import (
 from .state import AppState
 
 SCAN_MAX_CHARS = 12000
+VAULT_NOISE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
 
 def _parse_int_param(
@@ -25,6 +26,8 @@ def _parse_int_param(
     max_value: int | None = None,
 ) -> int:
     raw = default if value is None else value
+    if isinstance(raw, bool):
+        raise ToolError("invalid_parameter", f"{name} must be an integer")
     try:
         parsed = int(raw)
     except (TypeError, ValueError):
@@ -42,6 +45,12 @@ def _parse_bool_param(value: Any, *, name: str, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     raise ToolError("invalid_parameter", f"{name} must be boolean")
+
+
+def _normalize_path_param(value: Any, *, name: str = "path") -> str:
+    if not isinstance(value, str):
+        raise ToolError("invalid_path", f"{name} must be a string")
+    return normalize_relative_path(value)
 
 
 def _normalize_scan_cursor(cursor: Any) -> dict[str, Any]:
@@ -81,6 +90,7 @@ def _char_offset_after_line(text: str, line_no: int) -> int:
 
 def _range_from_lines(total: int, range_obj: dict[str, Any] | None) -> tuple[int, int]:
     ensure(range_obj is not None, "invalid_parameter", "range is required when full=false")
+    ensure(isinstance(range_obj, dict), "invalid_parameter", "range must be object when full=false")
     start = _parse_int_param(range_obj.get("start_line"), name="range.start_line", default=1, min_value=1)
     end = _parse_int_param(range_obj.get("end_line"), name="range.end_line", default=total, min_value=1)
     ensure(start >= 1 and end >= start, "invalid_parameter", "invalid range")
@@ -95,7 +105,7 @@ def vault_read(
     range: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     full = _parse_bool_param(full, name="full", default=False)
-    normalized = normalize_relative_path(path)
+    normalized = _normalize_path_param(path)
     file_path = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     ensure(file_path.is_file(), "not_found", "file not found", {"path": normalized})
 
@@ -130,6 +140,47 @@ def vault_read(
     }
 
 
+def vault_ls(state: AppState, path: str | None = None) -> dict[str, Any]:
+    base_path: str | None = None
+    base_dir = state.config.vault_root
+    if path is not None:
+        normalized = _normalize_path_param(path)
+        base_path = normalized
+        base_dir = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
+
+    ensure(base_dir.is_dir(), "not_found", "directory not found", {"path": base_path})
+
+    items: list[dict[str, Any]] = []
+    for child in base_dir.iterdir():
+        if child.is_symlink():
+            continue
+        if child.is_file() and child.name.casefold() in VAULT_NOISE_FILES:
+            continue
+        if child.is_file() and child.name.startswith("._"):
+            continue
+        child_rel = child.name if base_path is None else f"{base_path}/{child.name}"
+        if child.is_dir():
+            items.append(
+                {
+                    "name": child.name,
+                    "path": child_rel,
+                    "kind": "dir",
+                }
+            )
+            continue
+        if child.is_file():
+            items.append(
+                {
+                    "name": child.name,
+                    "path": child_rel,
+                    "kind": "file",
+                }
+            )
+
+    items.sort(key=lambda item: (item["kind"] != "dir", item["name"].casefold(), item["name"]))
+    return {"base_path": base_path, "items": items}
+
+
 def _enforce_vault_policy_on_create(vault_root: Path, path: str) -> None:
     if is_system_path_under_root(vault_root, path):
         raise ToolError("forbidden", ".system path is reserved for system-managed files", {"path": path})
@@ -145,8 +196,9 @@ def _enforce_vault_policy_on_replace(vault_root: Path, path: str) -> None:
 
 
 def vault_create(state: AppState, path: str, content: str) -> dict[str, Any]:
+    ensure(isinstance(content, str), "invalid_parameter", "content must be string")
     ensure(bool(content), "invalid_parameter", "content is required")
-    normalized = normalize_relative_path(path)
+    normalized = _normalize_path_param(path)
     _enforce_vault_policy_on_create(state.config.vault_root, normalized)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=False)
     ensure(not target.exists(), "conflict", "file already exists", {"path": normalized})
@@ -156,8 +208,10 @@ def vault_create(state: AppState, path: str, content: str) -> dict[str, Any]:
 
 
 def vault_replace(state: AppState, path: str, find: str, replace: str, max_replacements: int | None = None) -> dict[str, Any]:
+    ensure(isinstance(find, str), "invalid_parameter", "find must be string")
     ensure(bool(find), "invalid_parameter", "find is required")
-    normalized = normalize_relative_path(path)
+    ensure(isinstance(replace, str), "invalid_parameter", "replace must be string")
+    normalized = _normalize_path_param(path)
     _enforce_vault_policy_on_replace(state.config.vault_root, normalized)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     ensure(target.is_file(), "not_found", "target is not a file", {"path": normalized})
@@ -176,7 +230,7 @@ def vault_scan(
     start_line: int | None = None,
     cursor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized = normalize_relative_path(path)
+    normalized = _normalize_path_param(path)
     target = resolve_inside_root(state.config.vault_root, normalized, must_exist=True)
     text = target.read_text(encoding="utf-8")
     max_chars = SCAN_MAX_CHARS

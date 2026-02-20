@@ -1,0 +1,10 @@
+{"case_id":"gap_01","facet":"eligibility","query":"入院給付金 支払条件","manual_id":"給付金編","expected_paths":["02-1_入院.md"],"forbidden_paths":[]}
+{"case_id":"gap_02","facet":"definition","query":"支払条件 治療目的 入院 定義","manual_id":"給付金編","expected_paths":["02-1_入院.md"],"forbidden_paths":[]}
+{"case_id":"gap_03","facet":"eligibility","query":"手術給付金 支払条件","manual_id":"給付金編","expected_paths":["03-1_手術.md"],"forbidden_paths":[]}
+{"case_id":"gap_04","facet":"eligibility","query":"手術等 支払条件","manual_id":"給付金編","expected_paths":["03-2_手術等.md"],"forbidden_paths":[]}
+{"case_id":"gap_05","facet":"exceptions","query":"先進医療特約 支払条件 例外","manual_id":"約款編","expected_paths":["08_先進医療特約.md"],"forbidden_paths":[]}
+{"case_id":"gap_06","facet":"exceptions","query":"通院医療特約 支払条件 不適用","manual_id":"約款編","expected_paths":["07_通院医療特約.md"],"forbidden_paths":[]}
+{"case_id":"gap_07","facet":"eligibility","query":"女性医療特約 支払条件 対象","manual_id":"約款編","expected_paths":["10_女性医療特約.md"],"forbidden_paths":[]}
+{"case_id":"gap_08","facet":"eligibility","query":"成人医療特約 支払条件 対象","manual_id":"約款編","expected_paths":["09_成人医療特約.md"],"forbidden_paths":[]}
+{"case_id":"gap_09","facet":"procedure","query":"抗がん剤治療特約 請求条件 手順","manual_id":"給付金編","expected_paths":["09_抗がん剤治療特約.md"],"forbidden_paths":[]}
+{"case_id":"gap_10","facet":"procedure","query":"通院特約関連 請求条件 フロー","manual_id":"給付金編","expected_paths":["07_通院特約関連.md"],"forbidden_paths":[]}

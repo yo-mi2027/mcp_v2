@@ -10,6 +10,7 @@ WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
 
 def normalize_relative_path(path: str) -> str:
+    ensure(isinstance(path, str), "invalid_path", "path must be a string")
     ensure(bool(path and path.strip()), "invalid_path", "path is required")
     canonical = path.replace("\\", "/").strip()
     ensure(not canonical.startswith("/"), "invalid_path", "absolute path is not allowed")

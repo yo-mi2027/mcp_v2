@@ -1,6 +1,6 @@
 # 統合MCPサーバ v2 Vault仕様（現行）
 
-最終更新: 2026-02-11
+最終更新: 2026-02-19
 
 ## 1. Tool Catalog
 
@@ -8,6 +8,11 @@
 - `vault_read({ path, full?, range? })`
 - `vault_scan({ path, start_line?, cursor? })`
 - `vault_replace({ path, find, replace, max_replacements? })`
+- `vault_ls({ path? })`
+
+固定ルール:
+
+- `vault_ls` は探索用途の任意ツールであり、`vault_read` / `vault_scan` / `vault_create` / `vault_replace` の前提ではない。
 
 ## 2. `vault_create`
 
@@ -56,6 +61,7 @@ Input:
 - `full` は boolean のみ許可（非booleanは `invalid_parameter`）
 - `full=false` のとき `range` 必須
 - `range.start_line` / `range.end_line` は整数かつ `>= 1`
+- `range.start_line` / `range.end_line` に `true/false` は許可しない（`invalid_parameter`）
 - `range.start_line <= range.end_line`
 - `range.start_line` は対象ファイルの総行数範囲内
 - `max_chars` は固定値 `12000` で、入力から変更不可
@@ -101,6 +107,7 @@ Input:
 
 - `start_line` 指定時はそれを優先し、未指定時は `cursor.start_line`（未指定なら1）を使う
 - `start_line`（または `cursor.start_line`）は整数かつ対象ファイルの総行数範囲内
+- `start_line` / `cursor.start_line` / `cursor.char_offset` に `true/false` は許可しない（`invalid_parameter`）
 - `max_chars` は固定値 `12000`（`SCAN_MAX_CHARS`）で、入力から変更不可
 
 Output:
@@ -143,6 +150,7 @@ Input:
 - `daily/` 配下は `forbidden`
 - `max_replacements` 未指定は `1`
 - `max_replacements` は整数かつ `>= 0`
+- `max_replacements` に `true/false` は許可しない（`invalid_parameter`）
 
 Output:
 
@@ -150,5 +158,37 @@ Output:
 {
   "written_path": "string",
   "replacements": "number"
+}
+```
+
+## 6. `vault_ls`
+
+Input:
+
+```json
+{
+  "path": "string | null"
+}
+```
+
+固定ルール:
+
+- `path` 省略時は `VAULT_ROOT` 直下を列挙
+- 非再帰で1階層のみ返却
+- 返却順は `dir -> file`、同種内は名前の安定ソート
+- symlink は返却しない
+
+Output:
+
+```json
+{
+  "base_path": "string | null",
+  "items": [
+    {
+      "name": "string",
+      "path": "string",
+      "kind": "dir|file"
+    }
+  ]
 }
 ```

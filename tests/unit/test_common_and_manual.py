@@ -47,7 +47,12 @@ def test_is_subpath_casefold_supports_windows_paths() -> None:
 
 
 def test_manual_toc_groups_headings_by_path(state) -> None:
-    out = manual_toc(state, manual_id="m1")
+    out = manual_toc(
+        state,
+        manual_id="m1",
+        path_prefix="rules.md",
+        depth="deep",
+    )
     rules = next(x for x in out["items"] if x["path"] == "rules.md")
     assert len(rules["headings"]) >= 3
     assert all("title" in h and "line_start" in h for h in rules["headings"])
@@ -77,6 +82,129 @@ def test_manual_ls_navigates_one_level_by_id(state) -> None:
     assert {item["name"] for item in third["items"]} == {"more.md"}
 
 
+def test_manual_ls_rejects_repeated_root_call_without_selection(state) -> None:
+    _ = manual_ls(state, id="manuals")
+    with pytest.raises(ToolError) as e:
+        manual_ls(state, id="manuals")
+    assert e.value.code == "invalid_parameter"
+    assert "items[].id" in e.value.message
+
+
+def test_manual_ls_rejects_non_string_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_ls(state, id=123)  # type: ignore[arg-type]
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_ls_allows_root_call_again_after_selection(state) -> None:
+    root = manual_ls(state, id="manuals")
+    selected = root["items"][0]["id"]
+    _ = manual_ls(state, id=selected)
+    again = manual_ls(state, id="manuals")
+    assert again["id"] == "manuals"
+
+
+def test_manual_toc_defaults_to_shallow(state) -> None:
+    out = manual_toc(state, manual_id="m1")
+    first = out["items"][0]
+    assert first["headings"] == []
+    assert out["applied"]["depth"] == "shallow"
+
+
+def test_manual_toc_accepts_manual_id_with_outer_spaces(state) -> None:
+    out = manual_toc(state, manual_id=" m1 ", max_files=1)
+    assert out["applied"]["manual_id"] == "m1"
+    assert len(out["items"]) == 1
+
+
+def test_manual_toc_deep_requires_path_prefix(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_toc(state, manual_id="m1", depth="deep")
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_toc_rejects_root_manuals_id_with_guidance(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_toc(state, manual_id="manuals")
+    assert e.value.code == "invalid_parameter"
+    assert "items[].id" in e.value.message
+
+
+def test_manual_toc_path_prefix_filters_scope(state) -> None:
+    manual_dir = state.config.manuals_root / "m1"
+    (manual_dir / "sub").mkdir(parents=True, exist_ok=True)
+    (manual_dir / "sub" / "inside.md").write_text("# in\n", encoding="utf-8")
+    out = manual_toc(state, manual_id="m1", path_prefix="sub")
+    assert {item["path"] for item in out["items"]} == {"sub/inside.md"}
+
+
+def test_manual_toc_supports_pagination(state) -> None:
+    manual_dir = state.config.manuals_root / "m1" / "docs"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(3):
+        (manual_dir / f"f{idx}.md").write_text(f"# H{idx}\n", encoding="utf-8")
+    first = manual_toc(
+        state,
+        manual_id="m1",
+        path_prefix="docs",
+        depth="deep",
+        max_files=2,
+    )
+    assert len(first["items"]) == 2
+    assert first["next_cursor"] == {"offset": 2}
+    second = manual_toc(
+        state,
+        manual_id="m1",
+        path_prefix="docs",
+        depth="deep",
+        max_files=2,
+        cursor=first["next_cursor"],
+    )
+    assert len(second["items"]) == 1
+    assert second["next_cursor"] is None
+
+
+def test_manual_toc_rejects_large_max_files_without_path_prefix(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_toc(
+            state,
+            manual_id="m1",
+            max_files=51,
+        )
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_toc_rejects_large_max_files_with_deep(state) -> None:
+    manual_dir = state.config.manuals_root / "m1" / "docs"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(51):
+        (manual_dir / f"f{idx}.md").write_text(f"# H{idx}\n", encoding="utf-8")
+    with pytest.raises(ToolError) as e:
+        manual_toc(
+            state,
+            manual_id="m1",
+            path_prefix="docs",
+            depth="deep",
+            max_files=51,
+        )
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_toc_returns_needs_narrow_scope_on_hard_limit(state) -> None:
+    manual_dir = state.config.manuals_root / "m1" / "wide"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(201):
+        (manual_dir / f"f{idx}.md").write_text("# H\n", encoding="utf-8")
+    with pytest.raises(ToolError) as e:
+        manual_toc(
+            state,
+            manual_id="m1",
+            path_prefix="wide",
+            max_files=50,
+        )
+    assert e.value.code == "needs_narrow_scope"
+
+
 def test_manual_ls_rejects_file_id_expansion(state) -> None:
     root = manual_ls(state, id="manuals")
     m1_node = next(item for item in root["items"] if item["name"] == "m1")
@@ -95,6 +223,29 @@ def test_manual_read_json_section_scope_is_invalid(state) -> None:
             scope="section",
         )
     assert e.value.code == "invalid_scope"
+
+
+def test_manual_read_rejects_non_object_ref(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(state, ref=123)  # type: ignore[arg-type]
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_read_rejects_non_string_ref_path(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(state, ref={"manual_id": "m1", "path": 123})  # type: ignore[dict-item]
+    assert e.value.code == "invalid_path"
+
+
+def test_manual_read_rejects_root_manuals_id_with_guidance(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(
+            state,
+            ref={"manual_id": "manuals", "path": "rules.md"},
+            scope="section",
+        )
+    assert e.value.code == "invalid_parameter"
+    assert "items[].id" in e.value.message
 
 
 def test_manual_read_md_defaults_to_section_scope(state) -> None:
@@ -207,6 +358,13 @@ def test_manual_scan_uses_fixed_max_chars(state) -> None:
     assert out["applied"]["max_chars"] == 12000
 
 
+def test_manual_scan_rejects_root_manuals_id_with_guidance(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_scan(state, manual_id="manuals", path="rules.md")
+    assert e.value.code == "invalid_parameter"
+    assert "manual_ls(id='manuals')" in e.value.message
+
+
 def test_manual_scan_paginates_until_eof(state) -> None:
     text = ("a" * 12050) + "\nend\n"
     (state.config.manuals_root / "m1" / "long.md").write_text(text, encoding="utf-8")
@@ -276,32 +434,314 @@ def test_manual_scan_start_line_takes_precedence_over_cursor_char_offset(state) 
 
 def test_manual_find_rejects_non_boolean_expand_scope(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_find(state, query="対象外", expand_scope="yes")
+        manual_find(state, query="対象外", manual_id="m1", expand_scope="yes")
     assert e.value.code == "invalid_parameter"
+
+
+def test_manual_find_rejects_non_string_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_find(state, query="対象外", manual_id=123)  # type: ignore[arg-type]
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_find_rejects_root_manuals_id_with_guidance(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_find(state, query="対象外", manual_id="manuals")
+    assert e.value.code == "invalid_parameter"
+    assert "items[].id" in e.value.message
+
+
+def test_manual_find_rejects_non_array_required_terms(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_find(state, query="対象外", manual_id="m1", required_terms="対象外")
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_find_rejects_more_than_two_required_terms(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_find(state, query="対象外", manual_id="m1", required_terms=["対象外", "手順", "条件"])
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_find_applies_required_term_filter(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1", required_terms=["対象外"])
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+
+    assert out["applied"]["required_terms"] == ["対象外"]
+    assert hits["total"] >= 1
+    assert all("required_term" in ((item.get("ref") or {}).get("signals") or []) for item in hits["items"])
+
+
+def test_manual_find_runs_three_pass_merge_for_two_required_terms(state) -> None:
+    out = manual_find(
+        state,
+        query="対象外の条件と手順を教えて",
+        manual_id="m1",
+        expand_scope=False,
+        required_terms=["対象外", "手順"],
+    )
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+
+    assert out["applied"]["required_terms"] == ["対象外", "手順"]
+    assert hits["total"] >= 1
+    assert any("required_terms_rrf" in ((item.get("ref") or {}).get("signals") or []) for item in hits["items"])
+
+
+def test_query_decomp_subqueries_supports_compare_pattern() -> None:
+    sub_queries = tools_manual_module._query_decomp_subqueries(
+        "入院給付金と通院給付金の違い",
+        max_sub_queries=3,
+    )
+    assert sub_queries == ["入院給付金と通院給付金の違い", "入院給付金", "通院給付金"]
+
+
+def test_query_decomp_subqueries_supports_simple_compare_pattern() -> None:
+    sub_queries = tools_manual_module._query_decomp_subqueries(
+        "入院給付金と通院給付金",
+        max_sub_queries=3,
+    )
+    assert sub_queries == ["入院給付金と通院給付金", "入院給付金", "通院給付金"]
+
+
+def test_query_decomp_subqueries_supports_case_pattern() -> None:
+    sub_queries = tools_manual_module._query_decomp_subqueries(
+        "退院後の場合の通院日数制限",
+        max_sub_queries=3,
+    )
+    assert sub_queries == ["退院後の場合の通院日数制限", "退院後 通院日数制限", "通院日数制限"]
+
+
+def test_query_decomp_subqueries_supports_compare_keyword_pattern() -> None:
+    sub_queries = tools_manual_module._query_decomp_subqueries(
+        "入院給付金と通院給付金を比較",
+        max_sub_queries=3,
+    )
+    assert sub_queries == ["入院給付金と通院給付金を比較", "入院給付金", "通院給付金"]
+
+
+def test_query_decomp_subqueries_supports_vs_pattern() -> None:
+    sub_queries = tools_manual_module._query_decomp_subqueries(
+        "入院給付金 vs 通院給付金",
+        max_sub_queries=3,
+    )
+    assert sub_queries == ["入院給付金 vs 通院給付金", "入院給付金", "通院給付金"]
+
+
+def test_manual_find_applies_query_decomp_rrf_signal_when_enabled(state, monkeypatch) -> None:
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_ENABLED", "true")
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES", "3")
+    local_state = create_state(Config.from_env())
+    (local_state.config.manuals_root / "m1" / "proc.md").write_text("# 手順\n手順があります。\n", encoding="utf-8")
+    calls: list[str] = []
+
+    def fake_run_find_pass(*args, **kwargs):
+        query = kwargs.get("query") if "query" in kwargs else args[2]
+        manual_id = kwargs.get("manual_ids", [])[0] if "manual_ids" in kwargs else args[1][0]
+        calls.append(str(query))
+        if query == "対象外と手順の違い":
+            rows = []
+        elif query == "対象外":
+            rows = [
+                {
+                    "ref": {
+                        "target": "manual",
+                        "manual_id": manual_id,
+                        "path": "rules.md",
+                        "start_line": 3,
+                        "heading_id": "h-ex",
+                        "json_path": None,
+                        "title": "例外",
+                        "signals": ["exact"],
+                    },
+                    "path": "rules.md",
+                    "start_line": 3,
+                    "reason": None,
+                    "signals": ["exact"],
+                    "score": 1.2,
+                    "conflict_with": [],
+                    "gap_hint": None,
+                    "matched_tokens": ["対象外"],
+                    "token_hits": {"対象外": 1},
+                    "match_coverage": 1.0,
+                    "rank_explain": ["base=1.2"],
+                }
+            ]
+        elif query == "手順":
+            rows = [
+                {
+                    "ref": {
+                        "target": "manual",
+                        "manual_id": manual_id,
+                        "path": "proc.md",
+                        "start_line": 1,
+                        "heading_id": "h-proc",
+                        "json_path": None,
+                        "title": "手順",
+                        "signals": ["exact"],
+                    },
+                    "path": "proc.md",
+                    "start_line": 1,
+                    "reason": None,
+                    "signals": ["exact"],
+                    "score": 1.0,
+                    "conflict_with": [],
+                    "gap_hint": None,
+                    "matched_tokens": ["手順"],
+                    "token_hits": {"手順": 1},
+                    "match_coverage": 1.0,
+                    "rank_explain": ["base=1.0"],
+                }
+            ]
+        else:
+            rows = []
+        return rows, 1, max(1, len(rows)), 0, None, [], False, 2
+
+    monkeypatch.setattr(tools_manual_module, "_run_find_pass", fake_run_find_pass)
+
+    out = manual_find(local_state, query="対象外と手順の違い", manual_id="m1", expand_scope=False)
+    hits = manual_hits(local_state, trace_id=out["trace_id"], kind="candidates")
+    assert set(calls) == {"対象外と手順の違い", "対象外", "手順"}
+    assert hits["total"] == 2
+    assert all("query_decomp_rrf" in ((item.get("ref") or {}).get("signals") or []) for item in hits["items"])
+
+
+def test_manual_find_query_decomp_rrf_can_promote_multi_hit_candidate_with_normalized_mix(state, monkeypatch) -> None:
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_ENABLED", "true")
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT", "0.2")
+    local_state = create_state(Config.from_env())
+
+    def row(*, manual_id: str, path: str, start_line: int, score: float, token: str) -> dict[str, object]:
+        return {
+            "ref": {
+                "target": "manual",
+                "manual_id": manual_id,
+                "path": path,
+                "start_line": start_line,
+                "heading_id": None,
+                "json_path": None,
+                "title": path,
+                "signals": ["exact"],
+            },
+            "path": path,
+            "start_line": start_line,
+            "reason": None,
+            "signals": ["exact"],
+            "score": score,
+            "conflict_with": [],
+            "gap_hint": None,
+            "matched_tokens": [token],
+            "token_hits": {token: 1},
+            "match_coverage": 1.0,
+            "rank_explain": [f"base={score}"],
+        }
+
+    def fake_run_find_pass(*args, **kwargs):
+        query = kwargs.get("query") if "query" in kwargs else args[2]
+        manual_id = kwargs.get("manual_ids", [])[0] if "manual_ids" in kwargs else args[1][0]
+        if query == "対象外と手順の違い":
+            rows = []
+        elif query == "対象外":
+            rows = [
+                row(manual_id=manual_id, path="low_rrf.md", start_line=1, score=1.0, token="対象外"),
+                row(manual_id=manual_id, path="high_base.md", start_line=2, score=100.0, token="対象外"),
+            ]
+        elif query == "手順":
+            rows = [row(manual_id=manual_id, path="low_rrf.md", start_line=1, score=1.0, token="手順")]
+        else:
+            rows = []
+        return rows, 1, max(1, len(rows)), 0, None, [], False, 2
+
+    monkeypatch.setattr(tools_manual_module, "_run_find_pass", fake_run_find_pass)
+    out = manual_find(local_state, query="対象外と手順の違い", manual_id="m1", expand_scope=False)
+    hits = manual_hits(local_state, trace_id=out["trace_id"], kind="candidates")
+
+    assert hits["total"] == 2
+    assert hits["items"][0]["ref"]["path"] == "low_rrf.md"
+
+
+def test_manual_find_query_decomp_falls_back_when_all_subqueries_fail(state, monkeypatch) -> None:
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_ENABLED", "true")
+    local_state = create_state(Config.from_env())
+    attempts: dict[str, int] = {}
+
+    def fake_run_find_pass(*args, **kwargs):
+        query = kwargs.get("query") if "query" in kwargs else args[2]
+        manual_id = kwargs.get("manual_ids", [])[0] if "manual_ids" in kwargs else args[1][0]
+        attempts[query] = attempts.get(query, 0) + 1
+        if attempts[query] == 1:
+            raise RuntimeError("simulated sub-query failure")
+        return (
+            [
+                {
+                    "ref": {
+                        "target": "manual",
+                        "manual_id": manual_id,
+                        "path": "fallback.md",
+                        "start_line": 1,
+                        "heading_id": None,
+                        "json_path": None,
+                        "title": "fallback",
+                        "signals": ["exact"],
+                    },
+                    "path": "fallback.md",
+                    "start_line": 1,
+                    "reason": None,
+                    "signals": ["exact"],
+                    "score": 2.0,
+                    "conflict_with": [],
+                    "gap_hint": None,
+                    "matched_tokens": ["対象外"],
+                    "token_hits": {"対象外": 1},
+                    "match_coverage": 1.0,
+                    "rank_explain": ["base=2.0"],
+                }
+            ],
+            1,
+            1,
+            0,
+            None,
+            [],
+            False,
+            2,
+        )
+
+    monkeypatch.setattr(tools_manual_module, "_run_find_pass", fake_run_find_pass)
+    out = manual_find(local_state, query="対象外と手順の違い", manual_id="m1", expand_scope=False)
+    hits = manual_hits(local_state, trace_id=out["trace_id"], kind="candidates")
+
+    assert hits["total"] == 1
+    assert hits["items"][0]["ref"]["path"] == "fallback.md"
+    assert "query_decomp_rrf" not in ((hits["items"][0].get("ref") or {}).get("signals") or [])
 
 
 def test_manual_find_rejects_non_integer_budget_time_ms(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_find(state, query="対象外", budget={"time_ms": "abc"})
+        manual_find(state, query="対象外", manual_id="m1", budget={"time_ms": "abc"})
     assert e.value.code == "invalid_parameter"
 
 
 def test_manual_find_rejects_negative_budget_max_candidates(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_find(state, query="対象外", budget={"max_candidates": -1})
+        manual_find(state, query="対象外", manual_id="m1", budget={"max_candidates": -1})
     assert e.value.code == "invalid_parameter"
 
 
 def test_manual_find_rejects_non_boolean_include_claim_graph(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_find(state, query="対象外", include_claim_graph="true")
+        manual_find(state, query="対象外", manual_id="m1", include_claim_graph="true")
     assert e.value.code == "invalid_parameter"
 
 
-def test_manual_find_stage3_still_returns_loose_signal(state) -> None:
+def test_manual_find_requires_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_find(state, query="対象外")
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_find_stage3_returns_lexical_exact_signal(state) -> None:
     out = manual_find(state, query="対 象外", manual_id="m1", expand_scope=False)
     hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
-    assert any("loose" in (item["ref"] or {}).get("signals", []) for item in hits["items"])
+    assert any("exact" in (item["ref"] or {}).get("signals", []) for item in hits["items"])
 
 
 def test_manual_find_does_not_candidateize_heading_only_match(state) -> None:
@@ -316,7 +756,7 @@ def test_manual_find_does_not_candidateize_heading_only_match(state) -> None:
     assert hits["total"] == 0
 
 
-def test_manual_find_adds_heading_focus_signal_on_top_groups(state) -> None:
+def test_manual_find_does_not_add_heading_focus_signal(state) -> None:
     manual_dir = state.config.manuals_root / "m5"
     manual_dir.mkdir(parents=True, exist_ok=True)
     (manual_dir / "focus.md").write_text(
@@ -328,7 +768,7 @@ def test_manual_find_adds_heading_focus_signal_on_top_groups(state) -> None:
     hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
 
     assert hits["total"] == 2
-    assert "heading_focus" in ((hits["items"][0].get("ref") or {}).get("signals") or [])
+    assert all("heading_focus" not in ((item.get("ref") or {}).get("signals") or []) for item in hits["items"])
 
 
 def test_manual_find_does_not_match_reference_words_only(state) -> None:
@@ -357,19 +797,31 @@ def test_manual_find_stage3_does_not_expand_exceptions_only_candidates(state) ->
     assert any(item["reason"] == "stage_cap" for item in unscanned["items"])
 
 
-def test_manual_find_stage4_expands_exceptions_for_exceptional_query(state) -> None:
+def test_manual_find_runs_limited_stage4_when_expand_scope_true(state) -> None:
     manual_dir = state.config.manuals_root / "m3"
     manual_dir.mkdir(parents=True, exist_ok=True)
     (manual_dir / "exceptions_only.md").write_text("# 補足\nこの場合は対象外です。\n", encoding="utf-8")
 
-    out = manual_find(state, query="対象外", manual_id="m3", expand_scope=True)
-    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+    out_true = manual_find(state, query="対象外", manual_id="m3", expand_scope=True)
+    out_false = manual_find(state, query="対象外", manual_id="m3", expand_scope=False)
+    hits_true = manual_hits(state, trace_id=out_true["trace_id"], kind="candidates")
+    hits_false = manual_hits(state, trace_id=out_false["trace_id"], kind="candidates")
 
-    assert out["summary"]["candidates"] >= 1
-    assert any("exceptions" in (item["ref"] or {}).get("signals", []) for item in hits["items"])
+    assert out_true["summary"]["candidates"] >= out_false["summary"]["candidates"]
+    assert hits_true["total"] >= hits_false["total"]
+    assert any("expanded_scope" in ((item.get("ref") or {}).get("signals") or []) for item in hits_true["items"])
+    assert out_true["applied"]["requested_expand_scope"] is True
+    assert out_true["applied"]["expand_scope"] is True
+    assert out_false["applied"]["requested_expand_scope"] is False
+    assert out_false["applied"]["expand_scope"] is False
 
 
-def test_manual_find_corrective_can_trigger_stage4_when_heuristic_expand_is_off(state, monkeypatch) -> None:
+def test_manual_find_requested_expand_scope_is_null_when_omitted(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1")
+    assert out["applied"]["requested_expand_scope"] is None
+
+
+def test_manual_find_corrective_triggers_limited_stage4_when_expand_scope_true(state, monkeypatch) -> None:
     monkeypatch.setenv("CORRECTIVE_ENABLED", "true")
     monkeypatch.setenv("CORRECTIVE_MARGIN_MIN", "1.5")
     local_state = create_state(Config.from_env())
@@ -437,19 +889,23 @@ def test_manual_find_uses_late_reranker_hook(state) -> None:
     assert hits["items"][0]["ref"]["start_line"] != baseline_top_start
 
 
-def test_manual_find_only_unscanned_prioritizes_without_strict_filtering(state) -> None:
-    initial = manual_find(state, query="対象外", manual_id="m1", budget={"max_candidates": 1})
-    initial_unscanned = manual_hits(state, trace_id=initial["trace_id"], kind="unscanned")
+def test_manual_find_only_unscanned_prioritizes_without_strict_filtering(state, monkeypatch) -> None:
+    monkeypatch.setenv("MANUAL_FIND_SCAN_HARD_CAP", "1")
+    local_state = create_state(Config.from_env())
+
+    initial = manual_find(local_state, query="対象外", manual_id="m1", budget={"max_candidates": 1})
+    initial_unscanned = manual_hits(local_state, trace_id=initial["trace_id"], kind="unscanned")
     unscanned_keys = {
         f'{item["manual_id"]}:{item["path"]}'
         for item in initial_unscanned["items"]
     }
     followup = manual_find(
-        state,
+        local_state,
         query="対象外",
+        manual_id="m1",
         only_unscanned_from_trace_id=initial["trace_id"],
     )
-    hits = manual_hits(state, trace_id=followup["trace_id"], kind="candidates")
+    hits = manual_hits(local_state, trace_id=followup["trace_id"], kind="candidates")
     assert hits["total"] >= 1
     followup_keys = {
         f'{(item["ref"] or {}).get("manual_id") or hits.get("manual_id")}:{item["ref"]["path"]}'
@@ -458,16 +914,19 @@ def test_manual_find_only_unscanned_prioritizes_without_strict_filtering(state) 
     assert any(key in unscanned_keys for key in followup_keys)
 
 
-def test_manual_find_unscanned_collects_remaining_scope_after_cutoff(state) -> None:
-    out = manual_find(state, query="対象外", budget={"max_candidates": 1})
-    unscanned = manual_hits(state, trace_id=out["trace_id"], kind="unscanned")
+def test_manual_find_unscanned_collects_remaining_scope_after_cutoff(state, monkeypatch) -> None:
+    monkeypatch.setenv("MANUAL_FIND_SCAN_HARD_CAP", "1")
+    local_state = create_state(Config.from_env())
+
+    out = manual_find(local_state, query="対象外", manual_id="m1", budget={"max_candidates": 1})
+    unscanned = manual_hits(local_state, trace_id=out["trace_id"], kind="unscanned")
     keys = {f'{item["manual_id"]}:{item["path"]}' for item in unscanned["items"]}
     assert "m1:rules.md" in keys
     assert "m2:appendix.md" in keys
 
 
 def test_manual_find_summary_uses_minimal_fields(state) -> None:
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     assert set(out["summary"].keys()) == {
         "scanned_files",
         "scanned_nodes",
@@ -487,7 +946,7 @@ def test_manual_find_uses_next_actions_planner_output_when_valid(state) -> None:
         return [{"type": "manual_hits", "confidence": 0.9, "params": {"kind": "gaps", "offset": 0, "limit": 5}}]
 
     state.next_actions_planner = planner
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     assert captured["query"] == "対象外"
     assert isinstance(captured["summary"], dict)
     assert out["next_actions"] == [{"type": "manual_hits", "confidence": 0.9, "params": {"kind": "gaps", "offset": 0, "limit": 5}}]
@@ -495,7 +954,7 @@ def test_manual_find_uses_next_actions_planner_output_when_valid(state) -> None:
 
 def test_manual_find_falls_back_when_next_actions_planner_returns_invalid_schema(state) -> None:
     state.next_actions_planner = lambda payload: [{"type": "stop", "confidence": 0.8, "params": None}]
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     assert out["next_actions"][0]["type"] in {"manual_hits", "manual_read"}
 
 
@@ -504,7 +963,7 @@ def test_manual_find_falls_back_when_next_actions_planner_raises(state) -> None:
         raise RuntimeError("planner failed")
 
     state.next_actions_planner = planner
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     assert out["next_actions"][0]["type"] in {"manual_hits", "manual_read"}
 
 
@@ -522,8 +981,260 @@ def test_manual_hits_candidates_compacts_redundant_fields(state) -> None:
     assert "gap_hint" not in first
 
 
+def test_manual_hits_candidates_include_lexical_match_fields(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1")
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates", limit=1)
+    first = hits["items"][0]
+    assert isinstance(first.get("matched_tokens"), list)
+    assert isinstance(first.get("token_hits"), dict)
+    assert isinstance(first.get("match_coverage"), float)
+    assert isinstance(first.get("rank_explain"), list)
+
+
+def test_manual_find_reflects_term_frequency_in_scores(state) -> None:
+    manual_dir = state.config.manuals_root / "m8"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "tf.md").write_text(
+        "# 高頻度\n"
+        "支払 支払 支払 支払 支払 支払 支払 支払 支払 支払 支払 支払 支払\n"
+        "## 低頻度\n"
+        "支払 支払 支払\n",
+        encoding="utf-8",
+    )
+
+    out = manual_find(state, query="支払", manual_id="m8", expand_scope=False, budget={"max_candidates": 5})
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates", limit=2)
+
+    assert hits["total"] >= 2
+    first = hits["items"][0]
+    second = hits["items"][1]
+    assert first["ref"]["path"] == "tf.md"
+    assert second["ref"]["path"] == "tf.md"
+    assert float(first["score"]) > float(second["score"])
+    assert int(first["token_hits"]["支払"]) > int(second["token_hits"]["支払"])
+
+
+def test_candidate_sort_key_breaks_score_ties_by_token_hits() -> None:
+    weaker = {
+        "score": 6.6444,
+        "match_coverage": 1.0,
+        "matched_tokens": ["支払条件"],
+        "token_hits": {"支払条件": 3},
+        "path": "a.md",
+        "start_line": 1,
+    }
+    stronger = {
+        "score": 6.6444,
+        "match_coverage": 1.0,
+        "matched_tokens": ["支払条件"],
+        "token_hits": {"支払条件": 13},
+        "path": "z.md",
+        "start_line": 99,
+    }
+
+    ordered = sorted([weaker, stronger], key=tools_manual_module._candidate_sort_key)
+    assert ordered[0] is stronger
+
+
+def test_effective_scan_hard_cap_scales_with_budget() -> None:
+    assert tools_manual_module._effective_scan_hard_cap(5000, 1) == 50
+    assert tools_manual_module._effective_scan_hard_cap(5000, 200) == 4000
+    assert tools_manual_module._effective_scan_hard_cap(100, 200) == 100
+
+
+def test_file_diversity_rerank_reduces_same_path_dominance() -> None:
+    candidates = [
+        {
+            "path": "a.md",
+            "start_line": 1,
+            "score": 10.0,
+            "_rank_score": 10.0,
+            "match_coverage": 1.0,
+            "matched_tokens": ["通院"],
+            "token_hits": {"通院": 2},
+        },
+        {
+            "path": "a.md",
+            "start_line": 2,
+            "score": 9.9,
+            "_rank_score": 9.9,
+            "match_coverage": 1.0,
+            "matched_tokens": ["通院"],
+            "token_hits": {"通院": 2},
+        },
+        {
+            "path": "b.md",
+            "start_line": 1,
+            "score": 9.6,
+            "_rank_score": 9.6,
+            "match_coverage": 1.0,
+            "matched_tokens": ["通院"],
+            "token_hits": {"通院": 1},
+        },
+    ]
+
+    reranked = tools_manual_module._apply_file_diversity_rerank(candidates)
+
+    assert [item["path"] for item in reranked] == ["a.md", "b.md", "a.md"]
+    assert any("file_diversity=" in part for part in (reranked[2].get("rank_explain") or []))
+
+
+def test_manual_find_multilayer_tokenization_matches_compound_japanese_query(state) -> None:
+    manual_dir = state.config.manuals_root / "m9"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "compound.md").write_text(
+        "# 条件\n"
+        "この給付金の支払 条件を確認します。\n",
+        encoding="utf-8",
+    )
+
+    out = manual_find(state, query="支払条件", manual_id="m9", expand_scope=False)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates", limit=1)
+
+    assert hits["total"] >= 1
+    first = hits["items"][0]
+    assert first["ref"]["path"] == "compound.md"
+    assert float(first.get("match_coverage") or 0.0) >= 1.0
+
+
+def test_manual_find_multilayer_tokenization_matches_alnum_cjk_compound_query(state) -> None:
+    manual_dir = state.config.manuals_root / "m10"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "code.md").write_text(
+        "# 手術番号\n"
+        "対象となる手術番号は K867 です。\n",
+        encoding="utf-8",
+    )
+
+    out = manual_find(state, query="K867手術番号", manual_id="m10", expand_scope=False)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates", limit=1)
+
+    assert hits["total"] >= 1
+    first = hits["items"][0]
+    assert first["ref"]["path"] == "code.md"
+    matched_tokens = set(first.get("matched_tokens") or [])
+    assert "k867" in matched_tokens
+
+
+def test_segment_query_term_avoids_artificial_cjk_fragments() -> None:
+    tokens = tools_manual_module._segment_query_term("がん手術給付金")
+    assert "がん手" not in tokens
+    assert "がん" in tokens
+    assert "手術" in tokens
+    assert "給付金" in tokens
+
+
+def test_manual_find_scans_later_files_even_with_small_budget_max_candidates(state) -> None:
+    manual_dir = state.config.manuals_root / "m14"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "01_early.md").write_text(
+        "# 先頭\n"
+        + "\n".join(f"## 行{idx}\n入院 給付金 120日 です。" for idx in range(40)),
+        encoding="utf-8",
+    )
+    (manual_dir / "99_late.md").write_text(
+        "# 通院特約\n退院後120日以内の通院給付金を支払います。\n",
+        encoding="utf-8",
+    )
+
+    out = manual_find(
+        state,
+        query="通院特約 120日",
+        manual_id="m14",
+        expand_scope=False,
+        budget={"max_candidates": 5},
+    )
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates", limit=5)
+    assert hits["total"] >= 1
+    assert any(item["ref"]["path"] == "99_late.md" for item in hits["items"])
+
+
+def test_prf_expand_terms_uses_corpus_context_without_synonym_dictionary(state) -> None:
+    manual_dir = state.config.manuals_root / "m11"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "prf.md").write_text(
+        "# 先進\n"
+        "先進医療 負担額 負担額 負担額\n"
+        "## 一般\n"
+        "先進医療 特約\n",
+        encoding="utf-8",
+    )
+    manuals_fp = tools_manual_module._manuals_fingerprint(state, ["m11"])
+    sparse_index, _ = state.sparse_index.get_or_build(manual_ids=["m11"], fingerprint=manuals_fp)
+
+    expanded = tools_manual_module._prf_expand_terms(
+        sparse_index=sparse_index,
+        query_terms={"先進医療", "自己負担"},
+        missing_terms={"自己負担"},
+    )
+
+    assert "負担額" in expanded
+    assert all(not term.isdigit() for term in expanded)
+    assert all(":" not in term and "-" not in term and "|" not in term for term in expanded)
+
+
+def test_manual_find_boosts_code_exact_match(state) -> None:
+    manual_dir = state.config.manuals_root / "m12"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "codes.md").write_text(
+        "# 一般\n"
+        "手術番号 手術番号 手術番号 手術番号 手術番号 手術番号 手術番号\n"
+        "## コード\n"
+        "対象となる手術番号は K867 です。\n",
+        encoding="utf-8",
+    )
+
+    out = manual_find(state, query="K867 手術番号", manual_id="m12", expand_scope=False)
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates", limit=1)
+
+    assert hits["total"] >= 1
+    first = hits["items"][0]
+    assert first["ref"]["path"] == "codes.md"
+    assert "k867" in set(first.get("matched_tokens") or [])
+    assert "code_exact" in set((first.get("ref") or {}).get("signals") or [])
+
+
+def test_manual_find_skips_toc_like_paths(state) -> None:
+    manual_dir = state.config.manuals_root / "m7"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "00_目次.md").write_text("# 目次\n対象外です。\n", encoding="utf-8")
+    (manual_dir / "rules.md").write_text("# 本文\n対象外です。\n", encoding="utf-8")
+
+    out = manual_find(state, query="対象外", manual_id="m7")
+    hits = manual_hits(state, trace_id=out["trace_id"], kind="candidates")
+
+    assert hits["total"] >= 1
+    assert all(item["ref"]["path"] != "00_目次.md" for item in hits["items"])
+
+
+def test_manual_find_applies_dynamic_cutoff_max_50(state) -> None:
+    manual_dir = state.config.manuals_root / "m13"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(80):
+        (manual_dir / f"row_{idx:03d}.md").write_text(
+            f"# 行{idx}\n入院 給付金 対象です。\n",
+            encoding="utf-8",
+        )
+
+    out = manual_find(state, query="入院 給付金", manual_id="m13", budget={"max_candidates": 200})
+    assert out["summary"]["candidates"] <= 50
+    payload = state.traces.get(out["trace_id"]) or {}
+    assert payload.get("cutoff_reason") == "dynamic_cutoff"
+
+
+def test_manual_find_candidate_cap_means_scan_hard_cap(state, monkeypatch) -> None:
+    monkeypatch.setenv("MANUAL_FIND_SCAN_HARD_CAP", "1")
+    local_state = create_state(Config.from_env())
+
+    out = manual_find(local_state, query="対象外", manual_id="m1", budget={"max_candidates": 200})
+    payload = local_state.traces.get(out["trace_id"]) or {}
+    assert payload.get("cutoff_reason") == "candidate_cap"
+    unscanned = manual_hits(local_state, trace_id=out["trace_id"], kind="unscanned")
+    assert unscanned["total"] >= 1
+
+
 def test_manual_find_returns_claim_graph_when_requested(state) -> None:
-    out = manual_find(state, query="対象外", include_claim_graph=True)
+    out = manual_find(state, query="対象外", manual_id="m1", include_claim_graph=True)
     assert "claim_graph" in out
     assert "claims" in out["claim_graph"]
     assert "evidences" in out["claim_graph"]
@@ -532,12 +1243,12 @@ def test_manual_find_returns_claim_graph_when_requested(state) -> None:
 
 
 def test_manual_find_omits_claim_graph_by_default(state) -> None:
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     assert "claim_graph" not in out
 
 
 def test_manual_hits_supports_claim_graph_kinds(state) -> None:
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     trace_id = out["trace_id"]
     claims = manual_hits(state, trace_id=trace_id, kind="claims")
     evidences = manual_hits(state, trace_id=trace_id, kind="evidences")
@@ -572,6 +1283,31 @@ def test_manual_find_stage_cap_marks_unscanned_sections(state) -> None:
     out = manual_find(state, query="zzz", manual_id="m2", expand_scope=False)
     unscanned = manual_hits(state, trace_id=out["trace_id"], kind="unscanned")
     assert any(item["reason"] == "stage_cap" for item in unscanned["items"])
+
+
+def test_manual_find_stage_cap_result_is_cacheable(state, monkeypatch) -> None:
+    monkeypatch.setenv("SEM_CACHE_ENABLED", "true")
+    local_state = create_state(Config.from_env())
+
+    original = tools_manual_module._run_find_pass
+    calls = {"count": 0}
+
+    def counting_run_find_pass(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tools_manual_module, "_run_find_pass", counting_run_find_pass)
+    first = manual_find(local_state, query="zzz", manual_id="m2")
+    assert calls["count"] >= 1
+    assert any(item["reason"] == "stage_cap" for item in manual_hits(local_state, trace_id=first["trace_id"], kind="unscanned")["items"])
+
+    calls["count"] = 0
+    second = manual_find(local_state, query="zzz", manual_id="m2")
+    assert calls["count"] == 0
+    assert any(
+        item["reason"] == "stage_cap"
+        for item in manual_hits(local_state, trace_id=second["trace_id"], kind="unscanned")["items"]
+    )
 
 
 def test_manual_find_uses_exact_cache_hit_when_enabled(state, monkeypatch) -> None:
@@ -706,7 +1442,7 @@ def test_manual_find_adaptive_stats_records_sem_cache_fields_on_miss(state, monk
     assert row["sem_cache_mode"] == "miss"
     assert row["sem_cache_score"] is None
     assert row["latency_saved_ms"] is None
-    assert row["scoring_mode"] == "bm25"
+    assert row["scoring_mode"] == "lexical"
     assert isinstance(row["index_rebuilt"], bool)
     assert isinstance(row["index_docs"], int)
     assert isinstance(row["corrective_triggered"], bool)
@@ -734,16 +1470,8 @@ def test_manual_find_adaptive_stats_records_sem_cache_hit(state, monkeypatch) ->
     assert isinstance(row["stage4_executed"], bool)
 
 
-def test_manual_find_uses_default_manual_id_when_omitted(state, monkeypatch) -> None:
-    monkeypatch.setenv("DEFAULT_MANUAL_ID", "missing_manual")
-    local_state = create_state(Config.from_env())
-    with pytest.raises(ToolError) as e:
-        manual_find(local_state, query="対象外")
-    assert e.value.code == "not_found"
-
-
 def test_manual_hits_not_found_after_ttl(state) -> None:
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     trace_id = out["trace_id"]
     assert manual_hits(state, trace_id=trace_id)["total"] >= 1
     time.sleep(1.2)
@@ -753,16 +1481,30 @@ def test_manual_hits_not_found_after_ttl(state) -> None:
 
 
 def test_manual_hits_rejects_non_integer_offset(state) -> None:
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     with pytest.raises(ToolError) as e:
         manual_hits(state, trace_id=out["trace_id"], offset="abc")
     assert e.value.code == "invalid_parameter"
 
 
 def test_manual_hits_rejects_negative_limit(state) -> None:
-    out = manual_find(state, query="対象外")
+    out = manual_find(state, query="対象外", manual_id="m1")
     with pytest.raises(ToolError) as e:
         manual_hits(state, trace_id=out["trace_id"], limit=-1)
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_hits_rejects_boolean_limit(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1")
+    with pytest.raises(ToolError) as e:
+        manual_hits(state, trace_id=out["trace_id"], limit=True)
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_hits_rejects_non_string_kind(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1")
+    with pytest.raises(ToolError) as e:
+        manual_hits(state, trace_id=out["trace_id"], kind=["candidates"])  # type: ignore[arg-type]
     assert e.value.code == "invalid_parameter"
 
 
@@ -783,6 +1525,27 @@ def test_config_corrective_defaults(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("CORRECTIVE_MARGIN_MIN", raising=False)
     monkeypatch.delenv("CORRECTIVE_MIN_CANDIDATES", raising=False)
     monkeypatch.delenv("CORRECTIVE_ON_CONFLICT", raising=False)
+    monkeypatch.delenv("LEXICAL_COVERAGE_WEIGHT", raising=False)
+    monkeypatch.delenv("LEXICAL_PHRASE_WEIGHT", raising=False)
+    monkeypatch.delenv("LEXICAL_NUMBER_CONTEXT_BONUS", raising=False)
+    monkeypatch.delenv("LEXICAL_PROXIMITY_BONUS_NEAR", raising=False)
+    monkeypatch.delenv("LEXICAL_PROXIMITY_BONUS_FAR", raising=False)
+    monkeypatch.delenv("LEXICAL_LENGTH_PENALTY_WEIGHT", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_EXPLORATION_ENABLED", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_EXPLORATION_RATIO", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_EXPLORATION_MIN_CANDIDATES", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_EXPLORATION_SCORE_SCALE", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_STAGE4_ENABLED", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_STAGE4_BUDGET_TIME_MS", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_STAGE4_SCORE_PENALTY", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_QUERY_DECOMP_ENABLED", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_QUERY_DECOMP_RRF_K", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_SCAN_HARD_CAP", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_PER_FILE_CANDIDATE_CAP", raising=False)
+    monkeypatch.delenv("MANUAL_FIND_FILE_PRESCAN_ENABLED", raising=False)
 
     cfg = Config.from_env()
     assert cfg.corrective_enabled is False
@@ -791,9 +1554,84 @@ def test_config_corrective_defaults(tmp_path, monkeypatch) -> None:
     assert cfg.corrective_min_candidates == 3
     assert cfg.corrective_on_conflict is True
     assert cfg.sparse_query_coverage_weight == 0.35
+    assert cfg.lexical_coverage_weight == 0.50
+    assert cfg.lexical_phrase_weight == 0.50
+    assert cfg.lexical_number_context_bonus == 0.80
+    assert cfg.lexical_proximity_bonus_near == 1.00
+    assert cfg.lexical_proximity_bonus_far == 0.50
+    assert cfg.lexical_length_penalty_weight == 0.20
+    assert cfg.manual_find_exploration_enabled is True
+    assert cfg.manual_find_exploration_ratio == 0.20
+    assert cfg.manual_find_exploration_min_candidates == 2
+    assert cfg.manual_find_exploration_score_scale == 0.35
+    assert cfg.manual_find_stage4_enabled is True
+    assert cfg.manual_find_stage4_neighbor_limit == 2
+    assert cfg.manual_find_stage4_budget_time_ms == 15000
+    assert cfg.manual_find_stage4_score_penalty == 0.15
+    assert cfg.manual_find_query_decomp_enabled is True
+    assert cfg.manual_find_query_decomp_max_sub_queries == 3
+    assert cfg.manual_find_query_decomp_rrf_k == 60
+    assert cfg.manual_find_query_decomp_base_weight == 0.30
+    assert cfg.manual_find_scan_hard_cap == 5000
+    assert cfg.manual_find_per_file_candidate_cap == 8
+    assert cfg.manual_find_file_prescan_enabled is True
     assert cfg.late_rerank_enabled is False
     assert cfg.late_rerank_top_n == 50
     assert cfg.late_rerank_weight == 0.60
+
+
+def test_config_lexical_weights_accept_env_overrides(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LEXICAL_COVERAGE_WEIGHT", "0.9")
+    monkeypatch.setenv("LEXICAL_PHRASE_WEIGHT", "0.3")
+    monkeypatch.setenv("LEXICAL_NUMBER_CONTEXT_BONUS", "1.4")
+    monkeypatch.setenv("LEXICAL_PROXIMITY_BONUS_NEAR", "1.8")
+    monkeypatch.setenv("LEXICAL_PROXIMITY_BONUS_FAR", "0.7")
+    monkeypatch.setenv("LEXICAL_LENGTH_PENALTY_WEIGHT", "0.1")
+
+    cfg = Config.from_env()
+    assert cfg.lexical_coverage_weight == 0.9
+    assert cfg.lexical_phrase_weight == 0.3
+    assert cfg.lexical_number_context_bonus == 1.4
+    assert cfg.lexical_proximity_bonus_near == 1.8
+    assert cfg.lexical_proximity_bonus_far == 0.7
+    assert cfg.lexical_length_penalty_weight == 0.1
+
+
+def test_config_manual_find_expansion_and_exploration_accept_env_overrides(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("MANUAL_FIND_EXPLORATION_ENABLED", "false")
+    monkeypatch.setenv("MANUAL_FIND_EXPLORATION_RATIO", "0.4")
+    monkeypatch.setenv("MANUAL_FIND_EXPLORATION_MIN_CANDIDATES", "5")
+    monkeypatch.setenv("MANUAL_FIND_EXPLORATION_SCORE_SCALE", "0.6")
+    monkeypatch.setenv("MANUAL_FIND_STAGE4_ENABLED", "false")
+    monkeypatch.setenv("MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT", "3")
+    monkeypatch.setenv("MANUAL_FIND_STAGE4_BUDGET_TIME_MS", "1200")
+    monkeypatch.setenv("MANUAL_FIND_STAGE4_SCORE_PENALTY", "0.25")
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_ENABLED", "true")
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES", "2")
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_RRF_K", "50")
+    monkeypatch.setenv("MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT", "0.3")
+    monkeypatch.setenv("MANUAL_FIND_SCAN_HARD_CAP", "777")
+    monkeypatch.setenv("MANUAL_FIND_PER_FILE_CANDIDATE_CAP", "4")
+    monkeypatch.setenv("MANUAL_FIND_FILE_PRESCAN_ENABLED", "false")
+
+    cfg = Config.from_env()
+    assert cfg.manual_find_exploration_enabled is False
+    assert cfg.manual_find_exploration_ratio == 0.4
+    assert cfg.manual_find_exploration_min_candidates == 5
+    assert cfg.manual_find_exploration_score_scale == 0.6
+    assert cfg.manual_find_stage4_enabled is False
+    assert cfg.manual_find_stage4_neighbor_limit == 3
+    assert cfg.manual_find_stage4_budget_time_ms == 1200
+    assert cfg.manual_find_stage4_score_penalty == 0.25
+    assert cfg.manual_find_query_decomp_enabled is True
+    assert cfg.manual_find_query_decomp_max_sub_queries == 2
+    assert cfg.manual_find_query_decomp_rrf_k == 50
+    assert cfg.manual_find_query_decomp_base_weight == 0.3
+    assert cfg.manual_find_scan_hard_cap == 777
+    assert cfg.manual_find_per_file_candidate_cap == 4
+    assert cfg.manual_find_file_prescan_enabled is False
 
 
 def test_adaptive_thresholds_rollback_on_recall_drop(tmp_path) -> None:

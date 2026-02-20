@@ -37,7 +37,6 @@ class Config:
     workspace_root: Path
     manuals_root: Path
     vault_root: Path
-    default_manual_id: str | None
     log_level: str
     adaptive_tuning: bool
     adaptive_stats_path: Path
@@ -52,6 +51,27 @@ class Config:
     corrective_min_candidates: int
     corrective_on_conflict: bool
     sparse_query_coverage_weight: float
+    lexical_coverage_weight: float
+    lexical_phrase_weight: float
+    lexical_number_context_bonus: float
+    lexical_proximity_bonus_near: float
+    lexical_proximity_bonus_far: float
+    lexical_length_penalty_weight: float
+    manual_find_exploration_enabled: bool
+    manual_find_exploration_ratio: float
+    manual_find_exploration_min_candidates: int
+    manual_find_exploration_score_scale: float
+    manual_find_stage4_enabled: bool
+    manual_find_stage4_neighbor_limit: int
+    manual_find_stage4_budget_time_ms: int
+    manual_find_stage4_score_penalty: float
+    manual_find_query_decomp_enabled: bool
+    manual_find_query_decomp_max_sub_queries: int
+    manual_find_query_decomp_rrf_k: int
+    manual_find_query_decomp_base_weight: float
+    manual_find_scan_hard_cap: int
+    manual_find_per_file_candidate_cap: int
+    manual_find_file_prescan_enabled: bool
     late_rerank_enabled: bool
     late_rerank_top_n: int
     late_rerank_weight: float
@@ -71,13 +91,11 @@ class Config:
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", ".")).expanduser().resolve()
         manuals_root = Path(os.getenv("MANUALS_ROOT", str(workspace_root / "manuals"))).expanduser().resolve()
         vault_root = Path(os.getenv("VAULT_ROOT", str(workspace_root / "vault"))).expanduser().resolve()
-        default_manual_id = os.getenv("DEFAULT_MANUAL_ID")
 
         return cls(
             workspace_root=workspace_root,
             manuals_root=manuals_root,
             vault_root=vault_root,
-            default_manual_id=default_manual_id,
             log_level=os.getenv("LOG_LEVEL", "info"),
             adaptive_tuning=_env_bool("ADAPTIVE_TUNING", True),
             adaptive_stats_path=Path(
@@ -94,6 +112,27 @@ class Config:
             corrective_min_candidates=_env_int("CORRECTIVE_MIN_CANDIDATES", 3),
             corrective_on_conflict=_env_bool("CORRECTIVE_ON_CONFLICT", True),
             sparse_query_coverage_weight=_env_float("SPARSE_QUERY_COVERAGE_WEIGHT", 0.35),
+            lexical_coverage_weight=_env_float("LEXICAL_COVERAGE_WEIGHT", 0.50),
+            lexical_phrase_weight=_env_float("LEXICAL_PHRASE_WEIGHT", 0.50),
+            lexical_number_context_bonus=_env_float("LEXICAL_NUMBER_CONTEXT_BONUS", 0.80),
+            lexical_proximity_bonus_near=_env_float("LEXICAL_PROXIMITY_BONUS_NEAR", 1.00),
+            lexical_proximity_bonus_far=_env_float("LEXICAL_PROXIMITY_BONUS_FAR", 0.50),
+            lexical_length_penalty_weight=_env_float("LEXICAL_LENGTH_PENALTY_WEIGHT", 0.20),
+            manual_find_exploration_enabled=_env_bool("MANUAL_FIND_EXPLORATION_ENABLED", True),
+            manual_find_exploration_ratio=_env_float("MANUAL_FIND_EXPLORATION_RATIO", 0.20),
+            manual_find_exploration_min_candidates=_env_int("MANUAL_FIND_EXPLORATION_MIN_CANDIDATES", 2),
+            manual_find_exploration_score_scale=_env_float("MANUAL_FIND_EXPLORATION_SCORE_SCALE", 0.35),
+            manual_find_stage4_enabled=_env_bool("MANUAL_FIND_STAGE4_ENABLED", True),
+            manual_find_stage4_neighbor_limit=_env_int("MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT", 2),
+            manual_find_stage4_budget_time_ms=_env_int("MANUAL_FIND_STAGE4_BUDGET_TIME_MS", 15000),
+            manual_find_stage4_score_penalty=_env_float("MANUAL_FIND_STAGE4_SCORE_PENALTY", 0.15),
+            manual_find_query_decomp_enabled=_env_bool("MANUAL_FIND_QUERY_DECOMP_ENABLED", True),
+            manual_find_query_decomp_max_sub_queries=_env_int("MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES", 3),
+            manual_find_query_decomp_rrf_k=_env_int("MANUAL_FIND_QUERY_DECOMP_RRF_K", 60),
+            manual_find_query_decomp_base_weight=_env_float("MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT", 0.30),
+            manual_find_scan_hard_cap=_env_int("MANUAL_FIND_SCAN_HARD_CAP", 5000),
+            manual_find_per_file_candidate_cap=_env_int("MANUAL_FIND_PER_FILE_CANDIDATE_CAP", 8),
+            manual_find_file_prescan_enabled=_env_bool("MANUAL_FIND_FILE_PRESCAN_ENABLED", True),
             late_rerank_enabled=_env_bool("LATE_RERANK_ENABLED", False),
             late_rerank_top_n=_env_int("LATE_RERANK_TOP_N", 50),
             late_rerank_weight=_env_float("LATE_RERANK_WEIGHT", 0.60),

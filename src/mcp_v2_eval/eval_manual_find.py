@@ -19,6 +19,8 @@ DEFAULT_BUDGET_MAX_CANDIDATES = 200
 def default_thresholds(top_k: int = 5) -> dict[str, dict[str, Any]]:
     return {
         f"hit_rate@{top_k}": {"op": ">=", "value": 0.80},
+        f"recall@{top_k}": {"op": ">=", "value": 0.80},
+        f"mrr@{top_k}": {"op": ">=", "value": 0.60},
         f"precision@{top_k}": {"op": ">=", "value": 0.50},
         "gap_rate": {"op": "<=", "value": 0.25},
         "conflict_rate": {"op": "<=", "value": 0.20},
@@ -47,8 +49,8 @@ def load_eval_cases(path: Path) -> list[dict[str, Any]]:
         if not isinstance(expected_paths, list) or not expected_paths or not all(isinstance(p, str) and p for p in expected_paths):
             raise ValueError(f"line {idx} requires expected_paths as non-empty string list")
         manual_id = payload.get("manual_id")
-        if manual_id is not None and not isinstance(manual_id, str):
-            raise ValueError(f"line {idx} manual_id must be string or null")
+        if not isinstance(manual_id, str) or not manual_id.strip():
+            raise ValueError(f"line {idx} manual_id requires non-empty string")
         forbidden_paths = payload.get("forbidden_paths", [])
         if not isinstance(forbidden_paths, list) or not all(isinstance(p, str) for p in forbidden_paths):
             raise ValueError(f"line {idx} forbidden_paths must be string list")
@@ -65,7 +67,7 @@ def load_eval_cases(path: Path) -> list[dict[str, Any]]:
                 "case_id": case_id,
                 "facet": facet,
                 "query": query,
-                "manual_id": manual_id,
+                "manual_id": manual_id.strip(),
                 "expected_paths": expected_paths,
                 "forbidden_paths": forbidden_paths,
             }
@@ -110,7 +112,6 @@ def _estimate_case_tokens(summary: dict[str, Any], hit_items: list[dict[str, Any
     for item in hit_items:
         ref = item.get("ref") or {}
         chars += len(str(ref.get("path") or ""))
-        chars += len(str(ref.get("title") or ""))
         chars += 24
     return max(1, (chars + 3) // 4)
 
@@ -143,14 +144,16 @@ def evaluate_manual_find(
         started = time.monotonic()
         case_id = str(case.get("case_id") or "")
         query = str(case.get("query") or "")
-        manual_id = case.get("manual_id")
+        manual_id = str(case.get("manual_id") or "").strip()
+        if not manual_id:
+            raise ValueError(f"case {case_id or '<unknown>'} requires non-empty manual_id")
         expected_paths = {str(p) for p in case.get("expected_paths") or []}
         forbidden_paths = {str(p) for p in case.get("forbidden_paths") or []}
         try:
             found = manual_find(
                 state,
                 query=query,
-                manual_id=manual_id if isinstance(manual_id, str) else None,
+                manual_id=manual_id,
                 expand_scope=expand_scope,
                 budget={"time_ms": int(budget_time_ms), "max_candidates": int(budget_max_candidates)},
                 include_claim_graph=include_claim_graph,
@@ -158,6 +161,8 @@ def evaluate_manual_find(
             )
             trace_id = str(found["trace_id"])
             summary = found.get("summary") or {}
+            applied = found.get("applied") if isinstance(found.get("applied"), dict) else {}
+            applied_expand_scope = bool(applied.get("expand_scope")) if "expand_scope" in applied else False
             hits = manual_hits(state, trace_id=trace_id, kind="candidates", offset=0, limit=top_k)
             hit_items = [item for item in (hits.get("items") or []) if isinstance(item, dict)]
             top_paths: list[str] = []
@@ -168,6 +173,15 @@ def evaluate_manual_find(
                     top_paths.append(path)
             relevant_count = sum(1 for path in top_paths if path in expected_paths)
             hit = relevant_count > 0
+            recall = (relevant_count / len(expected_paths)) if expected_paths else 0.0
+            first_hit_rank: int | None = None
+            for idx, item in enumerate(hit_items, start=1):
+                ref = item.get("ref") or {}
+                path = ref.get("path")
+                if isinstance(path, str) and path in expected_paths:
+                    first_hit_rank = idx
+                    break
+            reciprocal_rank = (1.0 / float(first_hit_rank)) if first_hit_rank is not None else 0.0
             precision = relevant_count / float(top_k)
             precision_retrieved = (relevant_count / len(top_paths)) if top_paths else 0.0
             forbidden_hit = any(path in forbidden_paths for path in top_paths) if forbidden_paths else False
@@ -186,11 +200,15 @@ def evaluate_manual_find(
                     "expected_paths": sorted(expected_paths),
                     "forbidden_paths": sorted(forbidden_paths),
                     "hit": hit,
+                    "recall": round(recall, 4),
+                    "reciprocal_rank": round(reciprocal_rank, 4),
                     "precision": round(precision, 4),
                     "precision_retrieved": round(precision_retrieved, 4),
                     "gap": int(summary.get("gap_count", 0)) > 0,
                     "conflict": int(summary.get("conflict_count", 0)) > 0,
                     "forbidden_hit": forbidden_hit,
+                    "requested_expand_scope": bool(expand_scope),
+                    "applied_expand_scope": applied_expand_scope,
                     "est_tokens": est_tokens,
                     "error": None,
                 }
@@ -209,11 +227,15 @@ def evaluate_manual_find(
                     "expected_paths": sorted(expected_paths),
                     "forbidden_paths": sorted(forbidden_paths),
                     "hit": False,
+                    "recall": 0.0,
+                    "reciprocal_rank": 0.0,
                     "precision": 0.0,
                     "precision_retrieved": 0.0,
                     "gap": False,
                     "conflict": False,
                     "forbidden_hit": False,
+                    "requested_expand_scope": bool(expand_scope),
+                    "applied_expand_scope": None,
                     "est_tokens": 0,
                     "error": {"code": e.code, "message": e.message},
                 }
@@ -232,11 +254,15 @@ def evaluate_manual_find(
                     "expected_paths": sorted(expected_paths),
                     "forbidden_paths": sorted(forbidden_paths),
                     "hit": False,
+                    "recall": 0.0,
+                    "reciprocal_rank": 0.0,
                     "precision": 0.0,
                     "precision_retrieved": 0.0,
                     "gap": False,
                     "conflict": False,
                     "forbidden_hit": False,
+                    "requested_expand_scope": bool(expand_scope),
+                    "applied_expand_scope": None,
                     "est_tokens": 0,
                     "error": {"code": "unknown", "message": str(e)},
                 }
@@ -246,11 +272,15 @@ def evaluate_manual_find(
     if total_cases == 0:
         raise ValueError("no eval cases")
     hit_key = f"hit_rate@{top_k}"
+    recall_key = f"recall@{top_k}"
     precision_key = f"precision@{top_k}"
+    mrr_key = f"mrr@{top_k}"
     case_latencies = [float(row["latency_ms"]) for row in rows]
     case_tokens = [float(row.get("est_tokens") or 0.0) for row in rows]
     metrics = {
         hit_key: round(sum(1 for row in rows if row["hit"]) / total_cases, 4),
+        recall_key: round(sum(float(row["recall"]) for row in rows) / total_cases, 4),
+        mrr_key: round(sum(float(row["reciprocal_rank"]) for row in rows) / total_cases, 4),
         precision_key: round(sum(float(row["precision"]) for row in rows) / total_cases, 4),
         "precision@retrieved": round(sum(float(row["precision_retrieved"]) for row in rows) / total_cases, 4),
         "gap_rate": round(sum(1 for row in rows if row["gap"]) / total_cases, 4),
@@ -295,13 +325,26 @@ def build_eval_report(
     budget_time_ms: int,
     budget_max_candidates: int,
 ) -> dict[str, Any]:
+    applied_values = {
+        row.get("applied_expand_scope")
+        for row in (results.get("cases") or [])
+        if isinstance(row, dict) and row.get("applied_expand_scope") is not None
+    }
+    if len(applied_values) == 1:
+        applied_expand_scope: bool | list[bool] | None = bool(next(iter(applied_values)))
+    elif applied_values:
+        applied_expand_scope = sorted(bool(v) for v in applied_values)
+    else:
+        applied_expand_scope = None
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dataset_path": dataset_path.as_posix(),
         "dataset_hash": _hash_file(dataset_path),
         "top_k": top_k,
         "find_options": {
-            "expand_scope": expand_scope,
+            "expand_scope": bool(expand_scope),
+            "requested_expand_scope": bool(expand_scope),
+            "applied_expand_scope": applied_expand_scope,
             "include_claim_graph": include_claim_graph,
             "budget": {"time_ms": budget_time_ms, "max_candidates": budget_max_candidates},
         },

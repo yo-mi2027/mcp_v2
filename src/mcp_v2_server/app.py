@@ -14,6 +14,7 @@ from .tools_manual import manual_scan as manual_scan_impl
 from .tools_manual import manual_toc as manual_toc_impl
 from .tools_vault import (
     vault_create as vault_create_impl,
+    vault_ls as vault_ls_impl,
     vault_read as vault_read_impl,
     vault_replace as vault_replace_impl,
     vault_scan as vault_scan_impl,
@@ -27,10 +28,33 @@ except Exception as e:  # pragma: no cover - import guard for runtime setup
     ) from e
 
 
+MANUAL_TOOLS_REQUIRE_LS = {
+    "manual_toc",
+    "manual_find",
+    "manual_read",
+    "manual_scan",
+}
+
+def _enforce_discovery_order(state: AppState, tool: str) -> None:
+    if tool in MANUAL_TOOLS_REQUIRE_LS and not state.manual_ls_seen:
+        raise ToolError(
+            code="invalid_parameter",
+            message=f"{tool} requires discovery first; call manual_ls(id='manuals') before {tool}.",
+            details={"required_first_call": "manual_ls"},
+        )
+
+
+def _mark_discovery_seen(state: AppState, tool: str) -> None:
+    if tool == "manual_ls":
+        state.manual_ls_seen = True
+
+
 def _execute(state: AppState, tool: str, fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
     started = time.monotonic()
     try:
+        _enforce_discovery_order(state, tool)
         out = fn(*args, **kwargs)
+        _mark_discovery_seen(state, tool)
         fields: dict[str, Any] = {}
         if isinstance(out, dict):
             if tool == "manual_find":
@@ -51,6 +75,10 @@ def _execute(state: AppState, tool: str, fn: Callable[..., dict[str, Any]], *arg
             elif tool == "vault_read":
                 fields["path"] = kwargs.get("path")
                 fields["truncated"] = out.get("truncated")
+            elif tool == "vault_ls":
+                fields["path"] = kwargs.get("path")
+                items = out.get("items")
+                fields["items"] = len(items) if isinstance(items, list) else None
             elif tool == "vault_scan":
                 fields["path"] = kwargs.get("path")
                 fields["applied_range"] = out.get("applied_range")
@@ -87,14 +115,34 @@ def create_app(state: AppState | None = None) -> FastMCP:
         return _execute(app_state, "manual_ls", lambda: manual_ls_impl(app_state, id=id))
 
     @mcp.tool()
-    def manual_toc(manual_id: str) -> dict[str, Any]:
-        return _execute(app_state, "manual_toc", lambda: manual_toc_impl(app_state, manual_id=manual_id))
+    def manual_toc(
+        manual_id: str,
+        path_prefix: str | None = None,
+        max_files: int | None = None,
+        cursor: dict[str, Any] | int | str | None = None,
+        depth: str | None = None,
+        max_headings_per_file: int | None = None,
+    ) -> dict[str, Any]:
+        return _execute(
+            app_state,
+            "manual_toc",
+            lambda: manual_toc_impl(
+                app_state,
+                manual_id=manual_id,
+                path_prefix=path_prefix,
+                max_files=max_files,
+                cursor=cursor,
+                depth=depth,
+                max_headings_per_file=max_headings_per_file,
+            ),
+        )
 
     @mcp.tool()
     def manual_find(
         query: str,
-        manual_id: str | None = None,
+        manual_id: str,
         expand_scope: bool | None = None,
+        required_terms: list[str] | None = None,
         only_unscanned_from_trace_id: str | None = None,
         budget: dict[str, Any] | None = None,
         include_claim_graph: bool | None = None,
@@ -108,6 +156,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 query=query,
                 manual_id=manual_id,
                 expand_scope=expand_scope,
+                required_terms=required_terms,
                 only_unscanned_from_trace_id=only_unscanned_from_trace_id,
                 budget=budget,
                 include_claim_graph=include_claim_graph,
@@ -153,6 +202,15 @@ def create_app(state: AppState | None = None) -> FastMCP:
             app_state,
             "manual_hits",
             lambda: manual_hits_impl(app_state, trace_id=trace_id, kind=kind, offset=offset, limit=limit),
+        )
+
+    @mcp.tool()
+    def vault_ls(path: str | None = None) -> dict[str, Any]:
+        return _execute(
+            app_state,
+            "vault_ls",
+            lambda path=path: vault_ls_impl(app_state, path=path),
+            path=path,
         )
 
     @mcp.tool()

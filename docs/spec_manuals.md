@@ -1,12 +1,12 @@
 # 統合MCPサーバ v2 Manual仕様（現行）
 
-最終更新: 2026-02-13
+最終更新: 2026-02-19
 
 ## 1. Tool Catalog
 
 - `manual_ls({ id? })`
-- `manual_toc({ manual_id })`
-- `manual_find({ query, manual_id?, expand_scope?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache? })`
+- `manual_toc({ manual_id, path_prefix?, max_files?, cursor?, depth?, max_headings_per_file? })`
+- `manual_find({ query, manual_id, expand_scope?, required_terms?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
 - `manual_read({ ref, scope?, allow_file?, expand? })`
 - `manual_scan({ manual_id, path, start_line?, cursor? })`
@@ -42,6 +42,8 @@ Output:
 
 - `id` 未指定時は `manuals` を適用する。
 - `id=manuals` は `MANUALS_ROOT` 直下の manual ディレクトリのみ返す（1階層）。
+- `manual_ls(id="manuals")` の直後に再度 `manuals` を呼ぶことは不可。先に返却 `items[].id` のいずれかを選択して辿る。
+- `manual_toc` / `manual_find` / `manual_read` / `manual_scan` の前に、同一セッションで `manual_ls` の成功呼び出しが必須。
 - manual ディレクトリ `id` を指定すると、その直下の子要素のみ返す（再帰しない）。
 - ディレクトリ子は `kind=dir`、対象拡張子（`.md/.json`）のファイルは `kind=file` を返す。
 - file `id` は展開不可（`invalid_parameter`）。
@@ -52,7 +54,14 @@ Input:
 
 ```json
 {
-  "manual_id": "string"
+  "manual_id": "string",
+  "path_prefix": "string | null",
+  "max_files": "number | null",
+  "cursor": {
+    "offset": "number"
+  } | "number | string (offset shorthand) | null",
+  "depth": "shallow | deep | null",
+  "max_headings_per_file": "number | null"
 }
 ```
 
@@ -60,6 +69,19 @@ Output:
 
 ```json
 {
+  "applied": {
+    "manual_id": "string",
+    "path_prefix": "string",
+    "depth": "shallow | deep",
+    "max_files": "number",
+    "include_headings": "boolean",
+    "max_headings_per_file": "number",
+    "offset": "number"
+  },
+  "total_files": "number",
+  "next_cursor": {
+    "offset": "number"
+  },
   "items": [
     {
       "path": "string",
@@ -74,6 +96,16 @@ Output:
 }
 ```
 
+固定ルール:
+
+- `depth` 既定値は `shallow`。`deep` は見出しを返す。
+- `depth=deep` の場合、`path_prefix` は必須。
+- `path_prefix` を空にする場合、`max_files <= 50` を必須とする。
+- `depth=deep` の場合、`max_files <= 50` を必須とする。
+- `include_headings` は廃止。指定された場合は受理しない。
+- `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
+- 対象ファイル数がハード上限（200件）を超える場合は `needs_narrow_scope` を返す。
+
 ## 4. `manual_find`
 
 Input:
@@ -81,8 +113,9 @@ Input:
 ```json
 {
   "query": "string",
-  "manual_id": "string | null",
+  "manual_id": "string",
   "expand_scope": "boolean | null",
+  "required_terms": ["string"] | "null",
   "only_unscanned_from_trace_id": "string | null",
   "include_claim_graph": "boolean | null",
   "use_cache": "boolean | null",
@@ -98,6 +131,12 @@ Output:
 ```json
 {
   "trace_id": "string",
+  "applied": {
+    "manual_id": "string",
+    "requested_expand_scope": "boolean | null",
+    "expand_scope": "boolean",
+    "required_terms": ["string"]
+  },
   "claim_graph?": {
     "claims": [
       {
@@ -117,7 +156,7 @@ Output:
           "path": "string",
           "start_line": "number"
         },
-        "signals": ["heading|heading_focus|normalized|loose|exceptions|late_rerank"],
+        "signals": ["exact|phrase|anchor|number_context|proximity|exceptions|code_exact|prf|late_rerank|exploration|expanded_scope|query_decomp_rrf"],
         "score": "number",
         "snippet_digest": "string"
       }
@@ -163,20 +202,31 @@ Output:
 固定ルール:
 
 - `claim_graph` が統合の本体で、`summary` は `claim_graph` 由来の派生指標。
-- 一次候補の検索スコアは重み付き疎ベクトル（BM25）を基礎とし、`heading` / `exceptions` などのシグナル補正と query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT`）を加える。
+- 一次候補の検索スコアは lexical-only（`idf × tf`）を基礎とし、coverage/phrase/number-context/proximity の加点とノイズ減点で構成する。
+- lexical加減点の係数は環境変数（`LEXICAL_*`）で調整可能。
+- `MANUAL_FIND_EXPLORATION_*` により、候補集合に探索バケット（低prior候補）を固定比率で混在させる。
 - `LATE_RERANK_ENABLED=true` または `late_reranker` hook が設定されている場合、候補上位に late interaction rerank を適用する。
 - `include_claim_graph=true` のときのみ `claim_graph` を返す。
 - `summary.conflict_count` と `manual_hits(kind="conflicts").total` は一致する。
 - `summary.gap_count` と `manual_hits(kind="gaps").total` は一致する。
-- `expand_scope` 未指定時は `true` を適用する。
-- `CORRECTIVE_ENABLED=true` の場合、stage3 結果の品質（`gap/conflict/coverage/top-score margin/candidates`）に応じて stage4 へ昇格する。
-- `manual_id` 未指定かつ `DEFAULT_MANUAL_ID` が設定されている場合は、その `manual_id` を適用する。
+- `manual_id` は必須（未指定/空文字は `invalid_parameter`）。
+- `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
+- `required_terms` は省略可。指定時は文字列配列のみ許可し、最大2語まで（空文字不可）。
+- `required_terms` を2語指定した場合は `A` / `B` / `A+B` の3passで評価し、RRF統合で再ランキングする。
+- `expand_scope=true` かつ stage4必要判定時は、`MANUAL_FIND_STAGE4_*` 制約の範囲で隣接manualに限定拡張する。
+- レスポンスの `applied.requested_expand_scope` はリクエスト入力値（未指定なら `null`）を返す。
+- レスポンスの `applied.expand_scope` は実適用値を返す（stage4実行時のみ `true`）。
+- Query decomposition + RRF 有効時は、sub-query 失敗を許容して継続し、全sub-query失敗または結合候補0件時のみ通常検索にフォールバックする。
+- `CORRECTIVE_ENABLED=true` かつ `expand_scope=true` の場合は、条件を満たせば限定stage4昇格を実行する。
 - `expand_scope` と `include_claim_graph` と `use_cache` は boolean のみ許可（非booleanは `invalid_parameter`）。
 - `use_cache` 未指定時は `SEM_CACHE_ENABLED` 設定値を適用する。
 - cache hit でも `summary.gap_count/conflict_count` が閾値（`SEM_CACHE_MAX_SUMMARY_GAP/SEM_CACHE_MAX_SUMMARY_CONFLICT`）を超える場合は再探索する。
 - `budget.time_ms` 既定値は `60000`、`budget.max_candidates` 既定値は `200`。
 - `budget.time_ms` と `budget.max_candidates` は整数かつ `>= 1`。
-- 整数変換不能値は `invalid_parameter`。
+- `manual_find` は動的カットオフを適用し、返却候補数は `min(budget.max_candidates, 50)` を上限として score/coverage に応じてさらに縮小しうる。
+- 最終ランキングでは同一 `path` の過度な集中を抑える多様性リランキング（同一pathへの減衰）を適用する。
+- 整数変換不能値と `true/false` は `invalid_parameter`。
+- `manual_hits(kind="candidates")` の各 item は `matched_tokens` / `token_hits` / `match_coverage` / `rank_explain` を含みうる。
 
 ## 5. `manual_hits`
 
@@ -209,7 +259,8 @@ Output:
 - `kind` 未指定時は `candidates`。
 - `offset` 未指定時は `0`、`limit` 未指定時は `50`。
 - `offset` は整数かつ `>= 0`、`limit` は整数かつ `>= 1`。
-- `kind=candidates` の `items[]` は圧縮形式を返す（`target/json_path` は返さない）。
+- `offset` / `limit` は `true/false` を許可しない（`invalid_parameter`）。
+- `kind=candidates` の `items[]` は圧縮形式を返す（`target/json_path/title` は返さない）。
 - `kind=candidates` で全件の `manual_id` が同一なら、`manual_id` はレスポンス上位に1回だけ返し、`items[].ref.manual_id` は省略する。
 
 ## 6. `manual_read`
@@ -235,6 +286,7 @@ Input:
 固定ルール:
 
 - `.md` 既定 `scope=section`、`.json` 既定 `scope=file`。
+- `ref.manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
 - `.md` の `scope=file` は `ALLOW_FILE_SCOPE=true` かつ `allow_file=true` 必須。
 - `allow_file` は boolean のみ許可（非booleanは `invalid_parameter`）。
 - `.json` で `scope=section|sections` は `invalid_scope`。
@@ -277,6 +329,7 @@ Input:
 
 - `start_line` 指定時はそれを優先し、未指定時は `cursor.start_line`（未指定なら1）を使う。
 - `cursor` は object 形式に加えて、`char_offset` の shorthand として `number|string` も許可する。
+- `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
 - `start_line`（または `cursor.start_line`）は整数かつ対象ファイルの総行数範囲内のみ許可。
 - `max_chars` は固定値 `12000`（`SCAN_MAX_CHARS`）で、入力から変更不可。
 

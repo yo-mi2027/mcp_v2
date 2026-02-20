@@ -8,6 +8,7 @@ ALLOWED_ERROR_CODES = {
     "not_found",
     "invalid_path",
     "out_of_scope",
+    "needs_narrow_scope",
     "forbidden",
     "invalid_scope",
     "conflict",
