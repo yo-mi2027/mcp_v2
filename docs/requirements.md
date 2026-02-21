@@ -1,6 +1,6 @@
 # 統合MCPサーバ v2 要件定義（現行運用版）
 
-最終更新: 2026-02-19
+最終更新: 2026-02-20
 
 本書は現行実装の要件を運用向けに整理した文書である。  
 入出力の正本契約は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を優先する。
@@ -45,20 +45,25 @@
 ### 3.1 Manual探索
 
 - `manual_find` は lexical-only（語彙一致）で候補化する。
+- `manual_find` の `required_terms` は必須で、`1..2` 語を受け付ける。
+- `manual_find` は `g0(requiredなし)` と `g_req(requiredあり)` を常時実行し、RRF融合で最終候補を決定する。
+- `g_req` が0件の場合のみ `g0`（requiredなし）を採用する。
+- `required_terms` のDFガードは診断情報を返し、`too_rare` は語を保持、`too_common` は除外する。
+- `manual_find` は `required_effect_status` / `required_failure_reason` / strict/filtered候補数を返し、required失敗タイプを呼び出し側が判別できるようにする。
+- 導線は `manual_find`（+ `manual_hits`）を基本とし、網羅要求の入力時のみ `manual_scan` 優先導線を許可する。
 - 一次候補のスコアリングは `idf × tf` を基礎とし、coverage/phrase/number-context/proximity の加点とノイズ減点で再ランキングする。
 - lexical係数（coverage/phrase/number-context/proximity/length-penalty）は環境変数で調整可能とする。
 - `MANUAL_FIND_EXPLORATION_*` により、探索バケット（低prior候補）を混在させて recall を底上げする。
-- `LATE_RERANK_ENABLED=true` の場合、候補上位へ late interaction rerank を適用する。
 - 結果は `trace_id` を中心に返し、詳細は `manual_hits` で段階取得できる。
 - `manual_hits(kind="candidates")` は `matched_tokens` / `token_hits` / `match_coverage` / `rank_explain` を返せる。
+- 公開MCPツール（`app.py`）の `manual_find` / `manual_hits` は常時最小レスポンスを返す（compact固定）。
 - 統合判断として `claim_graph` を内部生成し、要約として `summary` と `next_actions` を返す。
 - `manual_id` は必須（未指定/空文字は `invalid_parameter`）。
-- `expand_scope` は boolean 入力のみ許可し、`true` かつ必要時は `MANUAL_FIND_STAGE4_*` 制約で限定stage4を実行する。
+- `expand_scope` は boolean 入力のみ許可する（後方互換のため受理。検索スコープ拡張は行わない）。
 - `SEM_CACHE_ENABLED=true` の場合、`manual_find` は `exact` -> `semantic` の順で cache lookup を行う。
-- cache key は `manual_id` / `expand_scope` / `budget` / `manuals_fingerprint` で分離し、manual更新時は自動無効化する。
+- cache key は `manual_id` / `budget` / `manuals_fingerprint`（+ `required_terms`）で分離し、manual更新時は自動無効化する。
 - `manual_toc` は対象ファイル数が 200 件を超える場合に `needs_narrow_scope` を返し、`path_prefix` の絞り込みを要求する。
 - `only_unscanned_from_trace_id` 指定時は cache をバイパスし、未探索優先フローを維持する。
-- `CORRECTIVE_ENABLED=true` かつ `expand_scope=true` では、必要時に限定stage4昇格を実行する。
 
 ### 3.2 Manual本文取得
 
@@ -164,18 +169,15 @@
 - 初期配分は `definition/procedure/eligibility/exceptions/compare/unknown` を各 `5問` 目安とする。
 - ゴールド正解は `path` 単位で定義し、`start_line` は参考情報（非ゲート）として扱う。
 - 評価時の `manual_find` 実行条件は次で固定する:
-  - `expand_scope=true`（限定stage4動作を含めて評価する）
+  - `expand_scope=true`（後方互換パラメータとして受理）
   - `include_claim_graph=false`
   - `budget.time_ms=60000`
   - `budget.max_candidates=200`
 - CI失敗ポリシーは2段階とする:
   - 導入後2週間は warning 運用（レポート出力のみ）
   - 以後は hard fail（閾値未達でCI失敗）
-- Eval結果は次へ保存する:
-  - `vault/.system/evals/YYYY-MM-DDTHHMMSSZ.json`
-  - `vault/.system/evals/latest.json`
+- Eval結果はファイル保存せず、CLI標準出力で確認する。
 - Semantic Cache比較時は `scripts/eval_manual_find.py --compare-sem-cache` を利用し、`baseline` と `with_sem_cache` の差分 (`metrics_delta`) を記録する。
-- Late rerank比較時は `scripts/eval_manual_find.py --compare-late-rerank` を利用し、`baseline` と `with_late_rerank` の差分 (`metrics_delta`) を記録する。
 - Eval結果JSONには少なくとも次を含める:
   - `dataset_hash`
   - `metrics`

@@ -17,34 +17,38 @@
 - `query` 必須
 - `manual_id` は必須。
 - `expand_scope` は boolean 入力のみ許可（未指定は `null` 扱い）。
-- `required_terms` は省略可。指定時は文字列配列（最大2語）を受理。
+- `required_terms` は必須。文字列配列（`1..2` 語）を受理する。
+- 進行方針は「`manual_find` 系（`g0 + g_req` 融合）」を基本とし、網羅要求時のみ `manual_scan` を優先する。
 - `budget.time_ms` / `budget.max_candidates` は整数かつ `>= 1`
 
 2. Semantic Cache 照合（有効時）
 - `only_unscanned_from_trace_id` 未指定時のみ lookup
 - `exact` -> `semantic` の順で照合
 - hit 時は保存済み `trace_payload` から新規 `trace_id` を発行して返却
-- `manual_id` / `expand_scope` / `budget` / `manuals_fingerprint` でスコープ分離
+- `manual_id` / `budget` / `manuals_fingerprint`（+ `required_terms`）でスコープ分離
 - `stage_cap` を含む結果も同一スコープで cache 再利用対象にする
 
 3. 候補抽出（cache miss 時）
 - 対象 manual 群を決定
 - `.md` は見出しノード単位、`.json` はファイル単位で走査
 - `required_terms` 指定時は候補採用条件に必須語一致を統合し、2語時は `A` / `B` / `A+B` の3pass結果をRRF統合
-- lexical シグナル（`exact/phrase/anchor/number_context/proximity/code_exact/prf/exceptions`）を評価
+- `required_terms` は検索前にDFガードを適用し、`applied.required_terms_df_filtered` に診断情報を記録する（`too_common` は除外、`too_rare` は保持）
+- `manual_find` は `g0`（requiredなし）と `g_req`（requiredあり）を実行し、RRF融合で候補を統合する
+- `g_req` が0件のときのみ `g0` を採用し、`applied.required_terms_relaxed=true` を返す
+- `applied.selected_gate` と `applied.gate_selection_reason` で最終採用ゲートを追跡できる
+- `applied.required_effect_status` / `required_failure_reason` / `required_strict_candidates` / `required_filtered_candidates` で、required語が有効だったかを診断できる
+- relax後候補にはノイズ抑制フィルタを適用し、弱一致のみの場合は0件を返す
+- lexical シグナル（`exact/required_term/required_term_and/required_terms_rrf/phrase/anchor/number_context/proximity/code_exact/prf/exceptions/definition_title`）を評価
 - BM25 を基礎に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT` / `LEXICAL_COVERAGE_WEIGHT`）を加点
 - Query Decomposition + RRF（`MANUAL_FIND_QUERY_DECOMP_ENABLED`）は既定ON。比較構文に一致した場合のみ sub-query 分解を実行し、部分失敗は許容して継続する。結合時は `base` と `rrf` を正規化混合（`MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT`）して再スコアする
-- `LATE_RERANK_ENABLED=true` または `late_reranker` hook 指定時は候補上位へ late interaction rerank を適用
 - 最終ランキングで同一 `path` の過度な集中を抑える多様性リランキングを適用
 - 探索中の `candidate_cap` は `min(MANUAL_FIND_SCAN_HARD_CAP, max(50, budget.max_candidates*20))` で制御
 - 返却直前に動的カットオフを適用し、返却候補上限は `min(budget.max_candidates, 50)`（さらに score/coverage 条件で縮小）
 - lexical 一致がある候補のみ採用（`exceptions` 単独では採用しない）
 
-4. 必要時の拡張
-- `expand_scope=true` かつ必要判定時は、隣接 manual へ限定した stage4 を実行する
-- `CORRECTIVE_ENABLED=true` の場合は、ギャップ/競合などの条件で限定 stage4 昇格を行う
+4. 不足時の補助
 - `only_unscanned_from_trace_id` 指定時は未探索セクションを優先
-- stage4 実行不可時は `stage_cap` を記録し、未探索候補を `unscanned` に積む
+- 候補不足（0件 / 低件数 / 高偏り）では `stage_cap` を記録し、未探索候補を `unscanned` に積む
 
 5. 統合判断
 - 候補から `claim_graph`（claims/evidences/edges/facets）を構築
@@ -92,9 +96,7 @@
 - `sem_cache_mode`: `bypass|miss|exact|semantic|guard_revalidate`
 - `sem_cache_score`: semantic 類似度スコア（exact/miss時は `null` 可）
 - `latency_saved_ms`: cache hit 時の推定短縮時間（ms）
-- `corrective_triggered`: Corrective 判定が発火したか
-- `stage4_executed`: stage4 の拡張探索を実行したか
-- `scoring_mode`: `lexical|query_decomp_rrf|cache`
+- `scoring_mode`: `lexical|query_decomp_rrf|gate_rrf|cache`
 
 ## 7. 非対象（本書）
 

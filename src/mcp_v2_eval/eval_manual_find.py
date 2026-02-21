@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp_v2_server.errors import ToolError
+from mcp_v2_server.normalization import normalize_text
 from mcp_v2_server.state import AppState
 from mcp_v2_server.tools_manual import manual_find, manual_hits
 
@@ -116,6 +117,27 @@ def _estimate_case_tokens(summary: dict[str, Any], hit_items: list[dict[str, Any
     return max(1, (chars + 3) // 4)
 
 
+def _required_terms_for_case(case: dict[str, Any]) -> list[str]:
+    raw = case.get("required_terms")
+    if isinstance(raw, list):
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            normalized = normalize_text(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+            if len(out) >= 2:
+                break
+        if out:
+            return out
+    query = str(case.get("query") or "").strip()
+    return [query] if query else ["required"]
+
+
 def evaluate_manual_find(
     state: AppState,
     cases: list[dict[str, Any]],
@@ -155,6 +177,7 @@ def evaluate_manual_find(
                 query=query,
                 manual_id=manual_id,
                 expand_scope=expand_scope,
+                required_terms=_required_terms_for_case(case),
                 budget={"time_ms": int(budget_time_ms), "max_candidates": int(budget_max_candidates)},
                 include_claim_graph=include_claim_graph,
                 record_adaptive_stats=False,

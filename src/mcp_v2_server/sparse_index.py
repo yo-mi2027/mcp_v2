@@ -16,7 +16,6 @@ class SparseDoc:
     manual_id: str
     path: str
     start_line: int
-    heading_id: str | None
     title: str
     raw_text: str
     normalized_text: str
@@ -85,7 +84,9 @@ def build_sparse_index(manuals_root: Path, *, manual_ids: list[str], fingerprint
                 for node in nodes:
                     node_lines = lines[node.line_start - 1 : node.line_end]
                     body_text = "\n".join(node_lines[1:]) if len(node_lines) > 1 else ""
-                    term_freq = Counter(split_terms(body_text))
+                    has_body_text = bool(body_text.strip())
+                    indexed_text = f"{node.title}\n{body_text}" if node.title and has_body_text else body_text
+                    term_freq = Counter(split_terms(indexed_text))
                     doc_len = sum(term_freq.values()) if term_freq else 1
                     doc_id = len(docs)
                     doc = SparseDoc(
@@ -93,10 +94,9 @@ def build_sparse_index(manuals_root: Path, *, manual_ids: list[str], fingerprint
                         manual_id=manual_id,
                         path=row.path,
                         start_line=node.line_start,
-                        heading_id=node.node_id,
                         title=node.title,
-                        raw_text=body_text,
-                        normalized_text=normalize_text(body_text),
+                        raw_text=indexed_text,
+                        normalized_text=normalize_text(indexed_text),
                         normalized_title=normalize_text(node.title),
                         term_freq=dict(term_freq),
                         doc_len=doc_len,
@@ -115,7 +115,6 @@ def build_sparse_index(manuals_root: Path, *, manual_ids: list[str], fingerprint
                     manual_id=manual_id,
                     path=row.path,
                     start_line=1,
-                    heading_id=None,
                     title=Path(row.path).name,
                     raw_text=text,
                     normalized_text=normalize_text(text),

@@ -4,6 +4,7 @@ import hashlib
 import time
 import base64
 import math
+import copy
 import re
 from collections import Counter
 from pathlib import Path
@@ -35,9 +36,9 @@ FACET_ORDER = ["definition", "procedure", "eligibility", "exceptions", "compare"
 FACET_HINTS_RAW: dict[str, list[str]] = {
     "definition": ["定義", "とは", "意味", "概要", "基本"],
     "procedure": ["手順", "フロー", "手続き", "ステップ", "方法"],
-    "eligibility": ["条件", "要件", "対象", "可否", "適用"],
+    "eligibility": ["条件", "要件", "対象", "可否", "適用", "支払", "日数", "回数", "上限", "金額", "限度", "無制限"],
     "exceptions": ["例外", "対象外", "除外", "不適用", "ただし", "但し"],
-    "compare": ["比較", "違い", "差分", "優先", "どちら"],
+    "compare": ["比較", "違い", "差分", "優先", "どちら", "対比", "vs"],
 }
 FACET_HINTS = {
     key: [normalize_text(word) for word in words]
@@ -107,6 +108,56 @@ REQUIRED_TERM_RRF_K = 60
 REQUIRED_TERM_RRF_BASE_WEIGHT = 0.70
 REQUIRED_TERM_RRF_AND_WEIGHT = 1.10
 REQUIRED_TERM_RRF_SINGLE_WEIGHT = 1.00
+REQUIRED_TERM_RRF_IMBALANCE_RATIO = 0.70
+REQUIRED_TERM_RRF_BASE_WEIGHT_IMBALANCED = 0.45
+REQUIRED_TERM_MATCH_BONUS = 2.40
+REQUIRED_TERM_DF_MIN_RATIO = 0.02
+REQUIRED_TERM_DF_MAX_RATIO = 0.85
+REQUIRED_TERM_DF_COMMON_MIN_DOCS = 20
+GATE_FUSION_RRF_K = 60
+GATE_FUSION_BASE_WEIGHT = 0.65
+GATE_FUSION_G0_WEIGHT = 1.00
+GATE_FUSION_REQUIRED_WEIGHT_MIN = 0.35
+GATE_FUSION_REQUIRED_WEIGHT_MAX = 1.35
+GATE_FUSION_TOP_K = 10
+GATE_FUSION_LOW_RATIO = 0.20
+GATE_FUSION_HIGH_RATIO = 0.75
+REQUIRED_EFFECT_TOP_K = 5
+EXHAUSTIVE_QUERY_HINTS = tuple(
+    normalize_text(term)
+    for term in (
+        "網羅",
+        "漏れなく",
+        "すべて",
+        "全て",
+        "全部",
+        "全件",
+        "包括的",
+    )
+)
+LEXICAL_TOKEN_HIT_COUNT_CAP = 20
+LEXICAL_DEFINITION_TITLE_BONUS = 0.90
+RELAXED_MIN_MATCHED_TOKENS = 2
+RELAXED_MIN_TOKEN_HIT_SUM = 3
+RELAXED_STRONG_SIGNALS = {"phrase", "code_exact", "proximity", "number_context"}
+DEFINITION_TITLE_HINTS = tuple(normalize_text(term) for term in ("定義", "基本", "支払事由", "概要"))
+ELIGIBILITY_QUERY_HINTS = tuple(normalize_text(term) for term in ("条件", "要件", "支払", "給付金", "事由"))
+CLAIM_GRAPH_STRONG_SIGNALS = {
+    "phrase",
+    "anchor",
+    "number_context",
+    "proximity",
+    "code_exact",
+    "required_term",
+    "required_term_and",
+}
+
+
+def _is_exhaustive_query(query: str) -> bool:
+    normalized_query = normalize_text(query)
+    if not normalized_query:
+        return False
+    return any(hint in normalized_query for hint in EXHAUSTIVE_QUERY_HINTS)
 
 
 def _parse_int_param(
@@ -180,7 +231,6 @@ def _cacheable_query(query: str) -> str:
 def _manual_find_scope_key(
     *,
     manual_id: str | None,
-    expand_scope: bool,
     max_candidates: int,
     budget_time_ms: int,
     required_terms: list[str] | None = None,
@@ -189,7 +239,6 @@ def _manual_find_scope_key(
     required = ",".join(required_terms or [])
     return (
         f"manual_id={scope_manual_id}"
-        f"|expand_scope={int(expand_scope)}"
         f"|max_candidates={max_candidates}"
         f"|budget_time_ms={budget_time_ms}"
         f"|required_terms={required}"
@@ -218,27 +267,155 @@ def _manuals_fingerprint(state: AppState, manual_ids: list[str]) -> str:
     return digest.hexdigest()
 
 
+def _compact_next_actions(next_actions: Any) -> list[dict[str, Any]]:
+    if not isinstance(next_actions, list):
+        return []
+    compact_actions: list[dict[str, Any]] = []
+    for item in next_actions:
+        if not isinstance(item, dict):
+            continue
+        action_type = item.get("type")
+        if not isinstance(action_type, str) or not action_type:
+            continue
+        compact_item: dict[str, Any] = {"type": action_type}
+        params = item.get("params")
+        if isinstance(params, dict) and params:
+            compact_item["params"] = params
+        compact_actions.append(compact_item)
+    return compact_actions
+
+
+def _compact_manual_find_output(
+    *,
+    trace_id: str,
+    summary: Any,
+    applied: dict[str, Any],
+    next_actions: Any,
+) -> dict[str, Any]:
+    summary_obj = summary if isinstance(summary, dict) else {}
+    candidates_raw = summary_obj.get("candidates")
+    candidates = int(candidates_raw) if isinstance(candidates_raw, int) else 0
+    status = applied.get("required_effect_status")
+    if not isinstance(status, str) or not status:
+        status = "required_effective"
+    failure_reason = applied.get("required_failure_reason")
+    if not isinstance(failure_reason, str) or not failure_reason:
+        failure_reason = None
+    return {
+        "trace_id": trace_id,
+        "candidates": candidates,
+        "status": status,
+        "failure_reason": failure_reason,
+        "next_actions": _compact_next_actions(next_actions),
+    }
+
+
 def _out_from_trace_payload(
     *,
     trace_id: str,
     trace_payload: dict[str, Any],
     include_claim_graph: bool,
+    compact: bool,
 ) -> dict[str, Any]:
     applied = trace_payload.get("applied")
     if not isinstance(applied, dict):
+        requested_required_terms = trace_payload.get("requested_required_terms")
+        if not isinstance(requested_required_terms, list):
+            requested_required_terms = trace_payload.get("required_terms") or []
+        required_terms_df_filtered = trace_payload.get("required_terms_df_filtered")
+        if not isinstance(required_terms_df_filtered, list):
+            required_terms_df_filtered = []
         applied = {
             "manual_id": trace_payload.get("manual_id"),
             "requested_expand_scope": None,
             "expand_scope": False,
+            "required_terms_source": trace_payload.get("required_terms_source") or "user",
+            "required_terms_decision_reason": trace_payload.get("required_terms_decision_reason"),
+            "requested_required_terms": requested_required_terms,
             "required_terms": trace_payload.get("required_terms") or [],
+            "required_terms_df_filtered": required_terms_df_filtered,
+            "required_terms_relaxed": bool(trace_payload.get("required_terms_relaxed", False)),
+            "required_terms_relax_reason": trace_payload.get("required_terms_relax_reason"),
+            "required_effect_status": trace_payload.get("required_effect_status") or "required_effective",
+            "required_failure_reason": trace_payload.get("required_failure_reason"),
+            "required_strict_candidates": int(trace_payload.get("required_strict_candidates") or 0),
+            "required_filtered_candidates": int(trace_payload.get("required_filtered_candidates") or 0),
+            "required_terms_match_stats": trace_payload.get("required_terms_match_stats") or [],
+            "required_terms_missing": trace_payload.get("required_terms_missing") or [],
+            "required_top_k": int(trace_payload.get("required_top_k") or 0),
+            "required_top_hits": int(trace_payload.get("required_top_hits") or 0),
+            "selected_gate": trace_payload.get("selected_gate") or "single",
+            "gate_selection_reason": trace_payload.get("gate_selection_reason"),
         }
-    out: dict[str, Any] = {
-        "trace_id": trace_id,
-        "summary": trace_payload.get("summary") or {},
-        "next_actions": trace_payload.get("next_actions") or [],
-        "applied": applied,
-    }
-    if include_claim_graph:
+    else:
+        applied = dict(applied)
+        if "requested_required_terms" not in applied:
+            requested = trace_payload.get("requested_required_terms")
+            if not isinstance(requested, list):
+                requested = trace_payload.get("required_terms") or []
+            applied["requested_required_terms"] = requested if isinstance(requested, list) else []
+        if "required_terms_df_filtered" not in applied:
+            dropped = trace_payload.get("required_terms_df_filtered")
+            applied["required_terms_df_filtered"] = dropped if isinstance(dropped, list) else []
+        if "required_terms_relaxed" not in applied:
+            applied["required_terms_relaxed"] = bool(trace_payload.get("required_terms_relaxed", False))
+        if "required_terms_relax_reason" not in applied:
+            reason = trace_payload.get("required_terms_relax_reason")
+            applied["required_terms_relax_reason"] = reason if isinstance(reason, str) and reason else None
+        if "required_effect_status" not in applied:
+            status = trace_payload.get("required_effect_status")
+            applied["required_effect_status"] = status if isinstance(status, str) and status else "required_effective"
+        if "required_failure_reason" not in applied:
+            reason = trace_payload.get("required_failure_reason")
+            applied["required_failure_reason"] = reason if isinstance(reason, str) and reason else None
+        if "required_strict_candidates" not in applied:
+            applied["required_strict_candidates"] = int(trace_payload.get("required_strict_candidates") or 0)
+        if "required_filtered_candidates" not in applied:
+            applied["required_filtered_candidates"] = int(trace_payload.get("required_filtered_candidates") or 0)
+        if "required_terms_match_stats" not in applied:
+            stats = trace_payload.get("required_terms_match_stats")
+            applied["required_terms_match_stats"] = stats if isinstance(stats, list) else []
+        if "required_terms_missing" not in applied:
+            missing = trace_payload.get("required_terms_missing")
+            applied["required_terms_missing"] = missing if isinstance(missing, list) else []
+        if "required_top_k" not in applied:
+            applied["required_top_k"] = int(trace_payload.get("required_top_k") or 0)
+        if "required_top_hits" not in applied:
+            applied["required_top_hits"] = int(trace_payload.get("required_top_hits") or 0)
+        if "required_terms_source" not in applied:
+            source = trace_payload.get("required_terms_source")
+            applied["required_terms_source"] = source if source == "user" else "user"
+        if "required_terms_decision_reason" not in applied:
+            reason = trace_payload.get("required_terms_decision_reason")
+            applied["required_terms_decision_reason"] = reason if isinstance(reason, str) and reason else None
+        if "selected_gate" not in applied:
+            gate = trace_payload.get("selected_gate")
+            applied["selected_gate"] = gate if isinstance(gate, str) and gate else "single"
+        if "gate_selection_reason" not in applied:
+            reason = trace_payload.get("gate_selection_reason")
+            applied["gate_selection_reason"] = reason if isinstance(reason, str) and reason else None
+    summary = trace_payload.get("summary") or {}
+    next_actions = trace_payload.get("next_actions") or []
+    out: dict[str, Any]
+    if compact:
+        out = _compact_manual_find_output(
+            trace_id=trace_id,
+            summary=summary,
+            applied=applied,
+            next_actions=next_actions,
+        )
+    else:
+        out = {
+            "trace_id": trace_id,
+            "summary": summary,
+            "next_actions": next_actions,
+            "applied": applied,
+        }
+    if not compact and isinstance(trace_payload.get("selected_gate"), str):
+        out["selected_gate"] = trace_payload.get("selected_gate")
+    if not compact and isinstance(trace_payload.get("gate_selection_reason"), str):
+        out["gate_selection_reason"] = trace_payload.get("gate_selection_reason")
+    if include_claim_graph and not compact:
         out["claim_graph"] = (trace_payload.get("claim_graph") or {})
     return out
 
@@ -254,6 +431,20 @@ def _cached_trace_payload_and_source_latency(value: Any) -> tuple[dict[str, Any]
     if isinstance(source_latency_raw, (int, float)) and not isinstance(source_latency_raw, bool):
         source_latency_ms = max(0, int(source_latency_raw))
     return trace_payload, source_latency_ms
+
+
+def _apply_cached_request_overrides(
+    *,
+    trace_payload: dict[str, Any],
+    requested_expand_scope: bool | None,
+) -> dict[str, Any]:
+    patched = copy.deepcopy(trace_payload)
+    patched["requested_expand_scope"] = requested_expand_scope
+    applied = patched.get("applied")
+    if isinstance(applied, dict):
+        applied["requested_expand_scope"] = requested_expand_scope
+        patched["applied"] = applied
+    return patched
 
 
 def _cached_summary_is_acceptable(state: AppState, summary: dict[str, Any]) -> bool:
@@ -294,9 +485,6 @@ def _record_manual_find_stats(
     scoring_mode: str = "heuristic",
     index_rebuilt: bool = False,
     index_docs: int | None = None,
-    corrective_triggered: bool = False,
-    corrective_reasons: list[str] | None = None,
-    stage4_executed: bool = False,
 ) -> None:
     chars_in = len(query)
     chars_out = len(str(summary))
@@ -329,9 +517,6 @@ def _record_manual_find_stats(
             "scoring_mode": scoring_mode,
             "index_rebuilt": index_rebuilt,
             "index_docs": index_docs,
-            "corrective_triggered": corrective_triggered,
-            "corrective_reasons": corrective_reasons or [],
-            "stage4_executed": stage4_executed,
         }
     )
 
@@ -399,16 +584,7 @@ def manual_ls(state: AppState, id: str | None = None) -> dict[str, Any]:
 
     if node_kind == "manuals":
         manual_ids = discover_manual_ids(state.config.manuals_root)
-        if state.manual_ls_root_pending and state.manual_root_ids:
-            hint = _manual_ls_next_hint(state.manual_root_ids)
-            raise ToolError(
-                "invalid_parameter",
-                "manual_ls(id='manuals') was already called; next call manual_ls(id=...) with one of previous items[].id."
-                f"{hint}",
-                {"candidate_ids": sorted(state.manual_root_ids)},
-            )
         state.manual_root_ids = set(manual_ids)
-        state.manual_ls_root_pending = bool(manual_ids)
         return {
             "id": "manuals",
             "items": [
@@ -418,8 +594,6 @@ def manual_ls(state: AppState, id: str | None = None) -> dict[str, Any]:
         }
 
     ensure(_manual_exists(state.config.manuals_root, manual_id), "not_found", "manual_id not found", {"manual_id": manual_id})
-    if state.manual_ls_root_pending and manual_id in state.manual_root_ids:
-        state.manual_ls_root_pending = False
     manual_root = state.config.manuals_root / manual_id
 
     if node_kind == "file":
@@ -861,6 +1035,7 @@ def _candidate_key(item: dict[str, Any]) -> str:
 
 def _infer_claim_facets(query: str, candidates: list[dict[str, Any]]) -> list[str]:
     query_norm = normalize_text(query)
+    raw_query = query.strip()
     ordered: list[str] = []
 
     def add(facet: str) -> None:
@@ -871,6 +1046,13 @@ def _infer_claim_facets(query: str, candidates: list[dict[str, Any]]) -> list[st
         if any(hint in query_norm for hint in hints):
             add(facet)
 
+    if (
+        QUERY_DECOMP_COMPARE_DIFF_RE.match(raw_query) is not None
+        or QUERY_DECOMP_COMPARE_KEYWORD_RE.match(raw_query) is not None
+        or QUERY_DECOMP_VS_RE.match(raw_query) is not None
+    ):
+        add("compare")
+
     if any("exceptions" in (item.get("signals") or []) for item in candidates):
         add("exceptions")
 
@@ -880,22 +1062,196 @@ def _infer_claim_facets(query: str, candidates: list[dict[str, Any]]) -> list[st
     return [facet for facet in FACET_ORDER if facet in ordered] or ["unknown"]
 
 
-def _relation_for_facet(facet: str, candidate: dict[str, Any]) -> tuple[str, float]:
+def _claim_texts_for_facet(query: str, facet: str) -> list[str]:
+    base = query.strip()
+    out: list[str] = []
+
+    def add(text: str) -> None:
+        value = text.strip()
+        if value and value not in out:
+            out.append(value)
+
+    add(base)
+    sub_queries = _query_decomp_subqueries(base, max_sub_queries=3)
+    intents = [item.strip() for item in sub_queries[1:] if isinstance(item, str) and item.strip()]
+    if facet == "compare":
+        for intent in intents[:2]:
+            add(intent)
+        if len(intents) >= 2:
+            add(f"{intents[0]} と {intents[1]}")
+    elif facet in {"procedure", "eligibility", "exceptions"} and len(intents) >= 2:
+        for intent in intents[:2]:
+            add(intent)
+
+    if not out:
+        return [base] if base else []
+    return out[:3]
+
+
+def _claim_terms(text: str) -> set[str]:
+    query_terms = split_terms(text)
+    expanded_terms, _ = _expand_lexical_query_terms(query_terms)
+    out = {
+        normalized
+        for normalized in (normalize_text(term) for term in expanded_terms)
+        if normalized
+    }
+    if out:
+        return out
+    normalized_text = normalize_text(text)
+    return {normalized_text} if normalized_text else set()
+
+
+def _candidate_terms(candidate: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    matched_tokens = candidate.get("matched_tokens")
+    if isinstance(matched_tokens, list):
+        for token in matched_tokens:
+            normalized = normalize_text(str(token))
+            if normalized:
+                out.add(normalized)
+    token_hits = candidate.get("token_hits")
+    if isinstance(token_hits, dict):
+        for token in token_hits.keys():
+            normalized = normalize_text(str(token))
+            if normalized:
+                out.add(normalized)
+    return out
+
+
+def _claim_coverage(candidate_terms: set[str], claim_terms: set[str]) -> float:
+    if not claim_terms:
+        return 0.0
+    matched = len(candidate_terms.intersection(claim_terms))
+    return matched / max(1, len(claim_terms))
+
+
+def _facet_match_score(
+    *,
+    facet: str,
+    query_norm: str,
+    candidate_terms: set[str],
+    signals: set[str],
+    claim_coverage: float,
+) -> float:
+    hints = FACET_HINTS.get(facet, [])
+    query_hint_hit = any(hint in query_norm for hint in hints)
+    hint_hits = 0
+    for hint in hints:
+        if any(hint in term for term in candidate_terms):
+            hint_hits += 1
+
+    score = 0.0
+    if query_hint_hit:
+        score += 0.12
+    if hint_hits > 0:
+        score += 0.28 + min(0.20, 0.08 * float(hint_hits - 1))
+    score += min(0.35, claim_coverage * 0.55)
+    if facet == "exceptions" and "exceptions" in signals:
+        score += 0.30
+    if facet == "compare" and claim_coverage >= 0.40:
+        score += 0.12
+    if facet == "unknown":
+        score = max(score, 0.18 + (claim_coverage * 0.45))
+    return min(1.0, score)
+
+
+def _candidate_has_facet_hint(candidate_terms: set[str], facet: str) -> bool:
+    hints = FACET_HINTS.get(facet, [])
+    if not hints or not candidate_terms:
+        return False
+    for hint in hints:
+        if any(hint in term for term in candidate_terms):
+            return True
+    return False
+
+
+def _candidate_score_norms(candidates: list[dict[str, Any]]) -> list[float]:
+    if not candidates:
+        return []
+    raw_scores: list[float] = []
+    for item in candidates:
+        score_raw = item.get("score")
+        if isinstance(score_raw, (int, float)) and not isinstance(score_raw, bool):
+            raw_scores.append(float(score_raw))
+        else:
+            raw_scores.append(float(_candidate_rank_score(item)))
+    min_score = min(raw_scores)
+    max_score = max(raw_scores)
+    if max_score <= min_score:
+        return [1.0 if max_score > 0 else 0.0 for _ in raw_scores]
+    denom = max_score - min_score
+    return [max(0.0, min(1.0, (score - min_score) / denom)) for score in raw_scores]
+
+
+def _relation_for_facet(
+    *,
+    facet: str,
+    candidate: dict[str, Any],
+    candidate_terms: set[str],
+    facet_match_score: float,
+    claim_coverage: float,
+    score_norm: float,
+) -> tuple[str, float] | None:
     signals = set(candidate.get("signals") or [])
-    strong_hit = bool(signals.intersection({"exact", "phrase", "anchor", "number_context", "proximity"}))
+    strong_hit = bool(signals.intersection(CLAIM_GRAPH_STRONG_SIGNALS))
+    lexical_hit = bool("exact" in signals or strong_hit)
+    has_exception = "exceptions" in signals
+    compare_hint_hit = _candidate_has_facet_hint(candidate_terms, "compare")
+
+    if not lexical_hit and facet_match_score < 0.20 and claim_coverage < 0.20:
+        return None
 
     if facet == "exceptions":
-        if "exceptions" in signals:
-            return "supports", 0.82
-        if strong_hit:
-            return "contradicts", 0.70
-        return "requires_followup", 0.50
+        if has_exception and facet_match_score >= 0.30:
+            relation = "supports"
+        elif lexical_hit and claim_coverage >= 0.45:
+            relation = "contradicts"
+        elif facet_match_score >= 0.20 or claim_coverage >= 0.25:
+            relation = "requires_followup"
+        else:
+            return None
+    elif facet == "eligibility":
+        if has_exception and claim_coverage >= 0.30:
+            relation = "contradicts"
+        elif lexical_hit and facet_match_score >= 0.26:
+            relation = "supports"
+        elif facet_match_score >= 0.18 or claim_coverage >= 0.25:
+            relation = "requires_followup"
+        else:
+            return None
+    elif facet == "compare":
+        if lexical_hit and claim_coverage >= 0.45 and facet_match_score >= 0.30 and compare_hint_hit:
+            relation = "supports"
+        elif lexical_hit and claim_coverage >= 0.35 and facet_match_score >= 0.25:
+            relation = "requires_followup"
+        elif claim_coverage >= 0.20:
+            relation = "requires_followup"
+        else:
+            return None
+    elif facet == "unknown":
+        if lexical_hit and score_norm >= 0.50 and claim_coverage >= 0.15:
+            relation = "supports"
+        elif claim_coverage >= 0.10 and score_norm >= 0.20:
+            relation = "requires_followup"
+        else:
+            return None
+    else:
+        if lexical_hit and facet_match_score >= 0.24:
+            relation = "supports"
+        elif claim_coverage >= 0.20:
+            relation = "requires_followup"
+        else:
+            return None
 
-    if facet == "eligibility" and "exceptions" in signals:
-        return "contradicts", 0.68
-    if strong_hit:
-        return "supports", 0.72
-    return "requires_followup", 0.50
+    base_conf = 0.25 + (0.35 * score_norm) + (0.30 * facet_match_score) + (0.10 * claim_coverage)
+    if relation == "supports":
+        confidence = base_conf + (0.08 if strong_hit else 0.02)
+    elif relation == "contradicts":
+        confidence = base_conf + 0.03
+    else:
+        confidence = 0.20 + (0.25 * facet_match_score) + (0.20 * claim_coverage) + (0.15 * score_norm)
+    return relation, round(max(0.05, min(0.98, confidence)), 4)
 
 
 def _build_claim_graph(
@@ -904,25 +1260,37 @@ def _build_claim_graph(
     candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     facets = _infer_claim_facets(query, candidates)
+    query_norm = normalize_text(query)
+    score_norms = _candidate_score_norms(candidates)
     claims: list[dict[str, Any]] = []
-    claim_by_facet: dict[str, str] = {}
-    for idx, facet in enumerate(facets, start=1):
-        claim_id = f"claim:{facet}:{idx}"
-        claim_by_facet[facet] = claim_id
-        claims.append(
-            {
-                "claim_id": claim_id,
-                "facet": facet,
-                "text": f"{query} [{facet}]",
-                "status": "unresolved",
-                "confidence": 0.0,
-            }
-        )
+    claim_terms_by_id: dict[str, set[str]] = {}
+    claim_index = 0
+    for facet in facets:
+        for claim_text in _claim_texts_for_facet(query, facet):
+            claim_index += 1
+            claim_id = f"claim:{facet}:{claim_index}"
+            claims.append(
+                {
+                    "claim_id": claim_id,
+                    "facet": facet,
+                    "text": f"{claim_text} [{facet}]",
+                    "status": "unresolved",
+                    "confidence": 0.0,
+                }
+            )
+            claim_terms_by_id[claim_id] = _claim_terms(claim_text)
 
     evidences: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     claim_stats: dict[str, dict[str, float]] = {
-        claim["claim_id"]: {"supports": 0, "contradicts": 0, "followups": 0, "support_score_sum": 0.0}
+        claim["claim_id"]: {
+            "supports": 0,
+            "contradicts": 0,
+            "followups": 0,
+            "support_conf_sum": 0.0,
+            "contradict_conf_sum": 0.0,
+            "followup_conf_sum": 0.0,
+        }
         for claim in claims
     }
 
@@ -930,7 +1298,10 @@ def _build_claim_graph(
         ref = candidate["ref"]
         evidence_id = f"ev:{idx}"
         score = float(candidate.get("score") or 0.0)
+        score_norm = score_norms[idx - 1] if idx - 1 < len(score_norms) else 0.0
         signals = sorted(set(candidate.get("signals") or []))
+        signal_set = set(signals)
+        candidate_term_set = _candidate_terms(candidate)
         digest_input = f'{ref.get("manual_id")}|{ref.get("path")}|{ref.get("start_line") or 1}|{",".join(signals)}|{score}'
         evidences.append(
             {
@@ -947,42 +1318,79 @@ def _build_claim_graph(
             }
         )
 
-        for facet in facets:
-            claim_id = claim_by_facet[facet]
-            relation, edge_confidence = _relation_for_facet(facet, candidate)
+        for claim in claims:
+            claim_id = claim["claim_id"]
+            facet = claim["facet"]
+            claim_term_set = claim_terms_by_id.get(claim_id) or set()
+            coverage = _claim_coverage(candidate_term_set, claim_term_set)
+            facet_score = _facet_match_score(
+                facet=facet,
+                query_norm=query_norm,
+                candidate_terms=candidate_term_set,
+                signals=signal_set,
+                claim_coverage=coverage,
+            )
+            relation_row = _relation_for_facet(
+                facet=facet,
+                candidate=candidate,
+                candidate_terms=candidate_term_set,
+                facet_match_score=facet_score,
+                claim_coverage=coverage,
+                score_norm=score_norm,
+            )
+            if relation_row is None:
+                continue
+            relation, edge_confidence = relation_row
             edges.append(
                 {
                     "from_claim_id": claim_id,
                     "to_evidence_id": evidence_id,
                     "relation": relation,
-                    "confidence": round(edge_confidence, 2),
+                    "confidence": round(edge_confidence, 4),
                 }
             )
             stats = claim_stats[claim_id]
             if relation == "supports":
                 stats["supports"] += 1
-                stats["support_score_sum"] += ((score + edge_confidence) / 2.0)
+                stats["support_conf_sum"] += edge_confidence
             elif relation == "contradicts":
                 stats["contradicts"] += 1
+                stats["contradict_conf_sum"] += edge_confidence
             else:
                 stats["followups"] += 1
+                stats["followup_conf_sum"] += edge_confidence
 
     for claim in claims:
         stats = claim_stats[claim["claim_id"]]
         supports = int(stats["supports"])
         contradicts = int(stats["contradicts"])
         followups = int(stats["followups"])
+        total_edges = supports + contradicts + followups
         if supports > 0 and contradicts > 0:
             status = "conflicted"
-        elif supports > 0:
+        elif supports > 0 and followups <= supports:
             status = "supported"
-        elif contradicts > 0 or followups > 0:
-            status = "unresolved"
         else:
             status = "unresolved"
-        confidence = (stats["support_score_sum"] / supports) if supports > 0 else 0.0
+        if total_edges <= 0:
+            confidence = 0.0
+        else:
+            support_ratio = supports / total_edges
+            contradict_ratio = contradicts / total_edges
+            followup_ratio = followups / total_edges
+            avg_support = (stats["support_conf_sum"] / supports) if supports > 0 else 0.0
+            confidence = (
+                (avg_support * 0.55)
+                + (support_ratio * 0.45)
+                - (contradict_ratio * 0.35)
+                - (followup_ratio * 0.20)
+            )
+            if status == "conflicted":
+                confidence *= 0.85
+            elif status == "unresolved":
+                confidence *= 0.75
         claim["status"] = status
-        claim["confidence"] = round(min(1.0, confidence), 4)
+        claim["confidence"] = round(max(0.0, min(1.0, confidence)), 4)
 
     facet_rows: list[dict[str, Any]] = []
     for facet in facets:
@@ -1095,76 +1503,6 @@ def _should_expand_scope(
     )
 
 
-def _shared_prefix_len(left: str, right: str) -> int:
-    out = 0
-    for l, r in zip(left, right):
-        if l != r:
-            break
-        out += 1
-    return out
-
-
-def _stage4_neighbor_manual_ids(state: AppState, *, manual_id: str, limit: int) -> list[str]:
-    all_ids = discover_manual_ids(state.config.manuals_root)
-    if not all_ids:
-        return []
-    limit = max(0, int(limit))
-    if limit == 0:
-        return []
-
-    indexed = {mid: idx for idx, mid in enumerate(all_ids)}
-    primary_idx = indexed.get(manual_id)
-    norm_primary = normalize_text(manual_id)
-    ranked: list[tuple[int, int, int, str]] = []
-    for idx, mid in enumerate(all_ids):
-        if mid == manual_id:
-            continue
-        norm_mid = normalize_text(mid)
-        prefix = _shared_prefix_len(norm_primary, norm_mid)
-        distance = abs(idx - primary_idx) if primary_idx is not None else len(all_ids)
-        ranked.append((prefix, distance, idx, mid))
-    ranked.sort(key=lambda row: (-row[0], row[1], row[2], row[3]))
-    return [row[3] for row in ranked[:limit]]
-
-
-def _merge_candidates(
-    primary: list[dict[str, Any]],
-    secondary: list[dict[str, Any]],
-    *,
-    score_penalty: float,
-    secondary_signal: str,
-    max_candidates: int,
-) -> list[dict[str, Any]]:
-    penalty = max(0.0, float(score_penalty))
-    cap = max(1, int(max_candidates))
-    merged: dict[str, dict[str, Any]] = {}
-    for item in primary:
-        merged[_candidate_key(item)] = dict(item)
-    for item in secondary:
-        row = dict(item)
-        base_score = _candidate_rank_score(row)
-        penalized = max(0.0, base_score - penalty)
-        row["_rank_score"] = penalized
-        row["score"] = round(penalized, 4)
-        signals = set(row.get("signals") or [])
-        signals.add(secondary_signal)
-        row["signals"] = sorted(signals)
-        ref = dict(row.get("ref") or {})
-        ref_signals = set(ref.get("signals") or [])
-        ref_signals.add(secondary_signal)
-        ref["signals"] = sorted(ref_signals)
-        row["ref"] = ref
-
-        key = _candidate_key(row)
-        prev = merged.get(key)
-        if prev is None or _prefer_candidate(row, prev):
-            merged[key] = row
-    return sorted(
-        merged.values(),
-        key=_candidate_sort_key,
-    )[:cap]
-
-
 def _is_noise_path(path: str) -> bool:
     normalized = normalize_text(Path(path).name)
     return any(term in normalized for term in NOISE_PATH_TERMS)
@@ -1222,8 +1560,8 @@ def _segment_query_term(term: str) -> list[str]:
     if not term:
         return []
     queue: list[str] = [term]
-    # Long compounds often include linking particles. Split once to expose sub-intents.
-    if len(term) >= 8 and "の" in term:
+    # Split once on the linking particle to expose sub-intents in short noun phrases too.
+    if "の" in term:
         split_parts = [part for part in term.split("の") if len(part) >= 2]
         if split_parts:
             queue = split_parts
@@ -1371,6 +1709,88 @@ def _required_term_passes(required_terms: list[str]) -> list[tuple[str, list[str
         ("single_a", [left], REQUIRED_TERM_RRF_SINGLE_WEIGHT),
         ("single_b", [right], REQUIRED_TERM_RRF_SINGLE_WEIGHT),
     ]
+
+
+def _required_term_doc_freq(sparse_index: SparseIndex, pattern_group: list[str]) -> int:
+    if sparse_index.total_docs <= 0 or not pattern_group:
+        return 0
+    doc_freq = 0
+    for doc in sparse_index.docs:
+        normalized_text = doc.normalized_text
+        if not normalized_text:
+            continue
+        if any(pattern in normalized_text for pattern in pattern_group):
+            doc_freq += 1
+    return doc_freq
+
+
+def _filter_required_terms_by_df(
+    *,
+    required_terms: list[str],
+    sparse_index: SparseIndex,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    if not required_terms or sparse_index.total_docs <= 0:
+        return list(required_terms), []
+
+    total_docs = max(1, int(sparse_index.total_docs))
+    pattern_groups = _required_term_pattern_groups(required_terms)
+    kept: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
+    for idx, term in enumerate(required_terms):
+        patterns = pattern_groups[idx] if idx < len(pattern_groups) and pattern_groups[idx] else [term]
+        doc_freq = _required_term_doc_freq(sparse_index, patterns)
+        doc_freq_ratio = doc_freq / float(total_docs)
+        reason: str | None = None
+        dropped = False
+        if doc_freq > 0 and doc_freq_ratio < REQUIRED_TERM_DF_MIN_RATIO:
+            reason = "too_rare"
+        elif total_docs >= REQUIRED_TERM_DF_COMMON_MIN_DOCS and doc_freq_ratio > REQUIRED_TERM_DF_MAX_RATIO:
+            reason = "too_common"
+            dropped = True
+        if not dropped:
+            kept.append(term)
+        if reason is None:
+            continue
+        diagnostics.append(
+            {
+                "term": term,
+                "doc_freq": int(doc_freq),
+                "doc_freq_ratio": round(doc_freq_ratio, 4),
+                "reason": reason,
+                "dropped": bool(dropped),
+            }
+        )
+    return kept, diagnostics
+
+
+def _required_term_match_stats(
+    *,
+    required_terms: list[str],
+    sparse_index: SparseIndex,
+) -> list[dict[str, Any]]:
+    if not required_terms:
+        return []
+    total_docs = max(1, int(sparse_index.total_docs))
+    pattern_groups = _required_term_pattern_groups(required_terms)
+    stats: list[dict[str, Any]] = []
+    for idx, term in enumerate(required_terms):
+        patterns = pattern_groups[idx] if idx < len(pattern_groups) and pattern_groups[idx] else [term]
+        doc_freq = _required_term_doc_freq(sparse_index, patterns)
+        stats.append(
+            {
+                "term": term,
+                "matched_docs": int(doc_freq),
+                "matched_doc_ratio": round(float(doc_freq) / float(total_docs), 4),
+            }
+        )
+    return stats
+
+
+def _required_match_count_from_pass_label(pass_label: str) -> int:
+    label = str(pass_label or "")
+    if "and" in label:
+        return 2
+    return 1
 
 
 def _match_coverage_ratio(matched_terms: set[str], coverage_groups: list[set[str]]) -> float:
@@ -1593,11 +2013,9 @@ def _prefer_candidate(candidate: dict[str, Any], prev: dict[str, Any]) -> bool:
 def _upsert_candidate_with_file_cap(
     *,
     candidates: dict[str, dict[str, Any]],
-    doc_terms_by_key: dict[str, set[str]],
     file_candidate_keys: dict[tuple[str, str], set[str]],
     file_key: tuple[str, str],
     candidate_row: dict[str, Any],
-    matched_terms: set[str],
     per_file_cap: int,
 ) -> bool:
     key = _candidate_key(candidate_row)
@@ -1613,7 +2031,6 @@ def _upsert_candidate_with_file_cap(
             valid_keys = []
         if not valid_keys:
             candidates[key] = candidate_row
-            doc_terms_by_key[key] = set(matched_terms)
             keys_for_file.add(key)
             return True
         worst_key = max(valid_keys, key=lambda item_key: _candidate_sort_key(candidates[item_key]))
@@ -1622,10 +2039,8 @@ def _upsert_candidate_with_file_cap(
             return False
         keys_for_file.remove(worst_key)
         candidates.pop(worst_key, None)
-        doc_terms_by_key.pop(worst_key, None)
 
     candidates[key] = candidate_row
-    doc_terms_by_key[key] = set(matched_terms)
     keys_for_file.add(key)
     return True
 
@@ -1677,124 +2092,6 @@ def _compact_match_text(text: str) -> str:
     )
 
 
-def _late_interaction_maxsim(query_terms: set[str], doc_terms: set[str]) -> float:
-    if not query_terms or not doc_terms:
-        return 0.0
-    score_sum = 0.0
-    for q in query_terms:
-        best = 0.0
-        for t in doc_terms:
-            if q == t:
-                best = 1.0
-                break
-            if q in t or t in q:
-                best = max(best, 0.7)
-        score_sum += best
-    return round(score_sum / len(query_terms), 4)
-
-
-def _rerank_candidates_with_late_interaction(
-    *,
-    query: str,
-    candidates: list[dict[str, Any]],
-    doc_terms_by_key: dict[str, set[str]],
-    top_n: int,
-    weight: float,
-) -> list[dict[str, Any]]:
-    if not candidates:
-        return candidates
-    query_terms = set(split_terms(query))
-    if not query_terms:
-        return candidates
-    applied_top_n = max(1, int(top_n))
-    applied_weight = max(0.0, float(weight))
-    if applied_weight <= 0.0:
-        return candidates
-
-    out = [dict(item) for item in candidates]
-    for idx, item in enumerate(out):
-        if idx >= applied_top_n:
-            break
-        key = _candidate_key(item)
-        doc_terms = doc_terms_by_key.get(key) or set()
-        late_score = _late_interaction_maxsim(query_terms, doc_terms)
-        if late_score <= 0.0:
-            continue
-        score = _candidate_rank_score(item)
-        boosted = score + (applied_weight * late_score)
-        item["_rank_score"] = boosted
-        item["score"] = round(boosted, 4)
-        signals = set(item.get("signals") or [])
-        signals.add("late_rerank")
-        item["signals"] = sorted(signals)
-        ref = dict(item.get("ref") or {})
-        ref_signals = set(ref.get("signals") or [])
-        ref_signals.add("late_rerank")
-        ref["signals"] = sorted(ref_signals)
-        item["ref"] = ref
-
-    return sorted(
-        out,
-        key=_candidate_sort_key,
-    )
-
-
-def _apply_late_rerank(
-    *,
-    state: AppState,
-    query: str,
-    candidates: list[dict[str, Any]],
-    doc_terms_by_key: dict[str, set[str]],
-) -> list[dict[str, Any]]:
-    def _is_candidate_row(row: Any) -> bool:
-        if not isinstance(row, dict):
-            return False
-        ref = row.get("ref")
-        if not isinstance(ref, dict):
-            return False
-        if not isinstance(ref.get("path"), str) or not ref.get("path"):
-            return False
-        if not isinstance(row.get("path"), str) or not row.get("path"):
-            return False
-        if not isinstance(row.get("signals"), list):
-            return False
-        score = row.get("score")
-        return isinstance(score, (int, float)) and not isinstance(score, bool)
-
-    reranker = state.late_reranker
-    if reranker is not None:
-        try:
-            raw = reranker(
-                {
-                    "query": query,
-                    "candidates": [dict(item) for item in candidates],
-                    "top_n": int(state.config.late_rerank_top_n),
-                    "weight": float(state.config.late_rerank_weight),
-                }
-            )
-            if isinstance(raw, list) and all(_is_candidate_row(item) for item in raw):
-                normalized_raw: list[dict[str, Any]] = []
-                for item in raw:
-                    row = dict(item)
-                    row["_rank_score"] = float(row.get("score") or 0.0)
-                    normalized_raw.append(row)
-                return sorted(
-                    normalized_raw,
-                    key=_candidate_sort_key,
-                )
-        except Exception:
-            pass
-    if not state.config.late_rerank_enabled:
-        return candidates
-    return _rerank_candidates_with_late_interaction(
-        query=query,
-        candidates=candidates,
-        doc_terms_by_key=doc_terms_by_key,
-        top_n=state.config.late_rerank_top_n,
-        weight=state.config.late_rerank_weight,
-    )
-
-
 def _apply_dynamic_candidate_cutoff(
     candidates: list[dict[str, Any]],
     *,
@@ -1827,6 +2124,65 @@ def _apply_dynamic_candidate_cutoff(
     if dynamic_limit < len(capped):
         return capped[:dynamic_limit], True
     return capped, applied
+
+
+def _candidate_token_hit_sum(item: dict[str, Any]) -> int:
+    token_hits = item.get("token_hits")
+    if not isinstance(token_hits, dict):
+        return 0
+    total = 0
+    for value in token_hits.values():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total += max(0, int(value))
+    return total
+
+
+def _is_strong_relaxed_candidate(item: dict[str, Any]) -> bool:
+    matched_tokens = item.get("matched_tokens")
+    matched_count = len(matched_tokens) if isinstance(matched_tokens, list) else 0
+    if matched_count >= RELAXED_MIN_MATCHED_TOKENS:
+        return True
+    if _candidate_token_hit_sum(item) >= RELAXED_MIN_TOKEN_HIT_SUM:
+        return True
+    signals = set(item.get("signals") or [])
+    if signals.intersection(RELAXED_STRONG_SIGNALS):
+        return True
+    return False
+
+
+def _filter_relaxed_candidates(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    if not candidates:
+        return candidates, False
+    kept = [item for item in candidates if _is_strong_relaxed_candidate(item)]
+    if kept:
+        return kept, len(kept) < len(candidates)
+    return [], bool(candidates)
+
+
+def _relaxed_candidates_are_weak(candidates: list[dict[str, Any]]) -> bool:
+    if not candidates:
+        return True
+    strong = sum(1 for item in candidates if _is_strong_relaxed_candidate(item))
+    if strong <= 0:
+        return True
+    return strong <= max(1, len(candidates) // 4)
+
+
+def _required_term_candidates_are_weak(candidates: list[dict[str, Any]], *, top_k: int = 3) -> bool:
+    if not candidates:
+        return True
+    applied_top_k = max(1, int(top_k))
+    top_rows = candidates[:applied_top_k]
+    strong = 0
+    for item in top_rows:
+        raw = item.get("_required_match_count")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 1
+        if value >= 2:
+            strong += 1
+    return strong <= 0
 
 
 def _apply_file_diversity_rerank(
@@ -1875,58 +2231,43 @@ def _apply_file_diversity_rerank(
     return selected
 
 
-def _top_score_margin(candidates: list[dict[str, Any]], *, top_k: int = 5) -> float:
-    if not candidates:
-        return 0.0
-    applied_top_k = max(1, int(top_k))
-    scores = [_candidate_rank_score(item) for item in candidates[:applied_top_k]]
-    top_score = scores[0]
-    if len(scores) == 1:
-        return 1.0 if top_score > 0 else 0.0
-    rest_mean = sum(scores[1:]) / len(scores[1:])
-    denom = max(1.0, abs(top_score))
-    return max(0.0, round((top_score - rest_mean) / denom, 4))
-
-
-def _needs_corrective_escalation(
-    state: AppState,
+def _default_scan_next_action(
+    manual_id: str | None,
+    candidates: list[dict[str, Any]],
     *,
+    manuals_root: Path | None,
+) -> dict[str, Any] | None:
+    if not manual_id:
+        return None
+    for item in candidates:
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        params: dict[str, Any] = {"manual_id": manual_id, "path": path}
+        start_line = item.get("start_line")
+        if isinstance(start_line, int) and start_line >= 1:
+            params["start_line"] = start_line
+        return {"type": "manual_scan", "confidence": 0.7, "params": params}
+    if manuals_root is not None:
+        for row in list_manual_files(manuals_root, manual_id=manual_id):
+            return {"type": "manual_scan", "confidence": 0.7, "params": {"manual_id": manual_id, "path": row.path}}
+    return None
+
+
+def _plan_next_actions(
     summary: dict[str, Any],
-    coverage_ratio: float,
-    top_margin: float,
-    total: int,
-) -> tuple[bool, list[str]]:
-    if not state.config.corrective_enabled:
-        return False, []
-
-    min_candidates = max(1, int(state.config.corrective_min_candidates))
-    coverage_min = max(0.0, min(1.0, float(state.config.corrective_coverage_min)))
-    margin_min = max(0.0, float(state.config.corrective_margin_min))
-    try:
-        gap_count = int(summary.get("gap_count", 0))
-    except (TypeError, ValueError):
-        gap_count = 0
-    try:
-        conflict_count = int(summary.get("conflict_count", 0))
-    except (TypeError, ValueError):
-        conflict_count = 0
-
-    reasons: list[str] = []
-    if gap_count > 0:
-        reasons.append("corrective_gap")
-    if state.config.corrective_on_conflict and conflict_count > 0:
-        reasons.append("corrective_conflict")
-    if total < min_candidates:
-        reasons.append("corrective_low_candidates")
-    if coverage_ratio < coverage_min:
-        reasons.append("corrective_low_coverage")
-    if top_margin < margin_min:
-        reasons.append("corrective_low_margin")
-    return bool(reasons), reasons
-
-
-def _plan_next_actions(summary: dict[str, Any], query: str, max_stage: int) -> list[dict[str, Any]]:
-    del query, max_stage
+    query: str,
+    max_stage: int,
+    *,
+    manual_id: str | None,
+    candidates: list[dict[str, Any]],
+    manuals_root: Path | None,
+) -> list[dict[str, Any]]:
+    del max_stage
+    if _is_exhaustive_query(query):
+        scan_action = _default_scan_next_action(manual_id, candidates, manuals_root=manuals_root)
+        if scan_action is not None:
+            return [scan_action]
     if summary["conflict_count"] > 0:
         return [{"type": "manual_read", "confidence": 0.7, "params": {"scope": "section"}}]
     return [{"type": "manual_hits", "confidence": 0.7, "params": {"kind": "integrated_top", "offset": 0}}]
@@ -1942,7 +2283,7 @@ def _validate_next_actions(actions: Any) -> list[dict[str, Any]]:
         action_type = item.get("type")
         confidence = item.get("confidence")
         params = item.get("params")
-        if action_type not in {"manual_hits", "manual_read", "manual_find"}:
+        if action_type not in {"manual_hits", "manual_read", "manual_find", "manual_scan"}:
             raise ToolError("invalid_parameter", "next_actions.type is invalid")
         if confidence is not None and not isinstance(confidence, (int, float)):
             raise ToolError("invalid_parameter", "next_actions.confidence must be a number or null")
@@ -1959,15 +2300,39 @@ def _plan_next_actions_with_planner(
     summary: dict[str, Any],
     query: str,
     max_stage: int,
+    *,
+    manual_id: str | None,
+    candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     planner = state.next_actions_planner
     if planner is None:
-        return _plan_next_actions(summary, query, max_stage)
+        return _plan_next_actions(
+            summary,
+            query,
+            max_stage,
+            manual_id=manual_id,
+            candidates=candidates,
+            manuals_root=state.config.manuals_root,
+        )
     try:
-        raw_actions = planner({"summary": summary, "query": query})
+        raw_actions = planner(
+            {
+                "summary": summary,
+                "query": query,
+                "manual_id": manual_id,
+                "candidate_paths": [str(item.get("path") or "") for item in candidates if item.get("path")],
+            }
+        )
         return _validate_next_actions(raw_actions)
     except Exception:
-        return _plan_next_actions(summary, query, max_stage)
+        return _plan_next_actions(
+            summary,
+            query,
+            max_stage,
+            manual_id=manual_id,
+            candidates=candidates,
+            manuals_root=state.config.manuals_root,
+        )
 
 
 def _run_find_pass(
@@ -1998,7 +2363,6 @@ def _run_find_pass(
     base_code_terms = {term for term in query_term_set if _is_code_like_term(term)}
     code_term_patterns = {term: _compile_code_pattern(term) for term in sorted(base_code_terms)}
     normalized_phrase_terms = [normalize_text(term) for term in base_terms if len(normalize_text(term)) >= 4]
-    doc_terms_by_key: dict[str, set[str]] = {}
     sparse_query_coverage_weight = max(0.0, float(state.config.sparse_query_coverage_weight))
     coverage_weight = max(0.0, float(state.config.lexical_coverage_weight))
     phrase_weight = max(0.0, float(state.config.lexical_phrase_weight))
@@ -2056,6 +2420,25 @@ def _run_find_pass(
     )
     applied_required_terms = list(required_terms or [])
     required_pattern_groups = _required_term_pattern_groups(applied_required_terms)
+    required_terms_added_to_query: list[str] = []
+    if applied_required_terms:
+        for term in applied_required_terms:
+            if term in query_term_set:
+                continue
+            query_term_set.add(term)
+            lexical_terms.append(term)
+            term_weights[term] = max(1.05, float(term_weights.get(term, 1.0)))
+            required_terms_added_to_query.append(term)
+    if required_terms_added_to_query:
+        for term in required_terms_added_to_query:
+            term_doc_freq.setdefault(term, 0)
+        for doc in sparse_index.docs:
+            text = doc.normalized_text
+            if not text:
+                continue
+            for term in required_terms_added_to_query:
+                if term in text:
+                    term_doc_freq[term] = term_doc_freq.get(term, 0) + 1
     per_file_cap = max(1, min(int(state.config.manual_find_per_file_candidate_cap), max_candidates))
     prescan_enabled = bool(state.config.manual_find_file_prescan_enabled)
     file_candidate_keys: dict[tuple[str, str], set[str]] = {}
@@ -2137,11 +2520,12 @@ def _run_find_pass(
                 compact_text = _compact_match_text(normalized_text)
                 token_hits: dict[str, int] = {}
                 for term in lexical_terms:
-                    count = normalized_text.count(term)
-                    if count <= 0:
+                    raw_count = normalized_text.count(term)
+                    if raw_count <= 0:
                         compact_term = _compact_match_text(term)
                         if compact_term:
-                            count = compact_text.count(compact_term)
+                            raw_count = compact_text.count(compact_term)
+                    count = min(int(raw_count), LEXICAL_TOKEN_HIT_COUNT_CAP)
                     if count > 0:
                         token_hits[term] = count
                 if not token_hits:
@@ -2194,6 +2578,12 @@ def _run_find_pass(
                 code_exact_bonus = float(code_exact_hits) * CODE_EXACT_BONUS
                 prf_support_hits = len(matched_terms.intersection(feedback_term_set))
                 prf_support_bonus = float(min(2, prf_support_hits)) * PRF_TERM_WEIGHT
+                definition_title_bonus = 0.0
+                if (
+                    any(hint in doc.normalized_title for hint in DEFINITION_TITLE_HINTS)
+                    and any(hint in query_term_set for hint in ELIGIBILITY_QUERY_HINTS)
+                ):
+                    definition_title_bonus = LEXICAL_DEFINITION_TITLE_BONUS
 
                 length_penalty = max(0.0, (len(normalized_text) - 3000) / 3000.0) * length_penalty_weight
                 score = (
@@ -2205,6 +2595,7 @@ def _run_find_pass(
                     + proximity_bonus
                     + code_exact_bonus
                     + prf_support_bonus
+                    + definition_title_bonus
                     - length_penalty
                 )
                 if score <= 0:
@@ -2227,6 +2618,8 @@ def _run_find_pass(
                     signals.add("code_exact")
                 if prf_support_hits > 0:
                     signals.add("prf")
+                if definition_title_bonus > 0:
+                    signals.add("definition_title")
                 if any(word in normalized_text for word in NORMALIZED_EXCEPTION_WORDS) and any(
                     term in FACET_HINTS["exceptions"] or term in NORMALIZED_EXCEPTION_WORDS
                     for term in matched_terms
@@ -2251,6 +2644,8 @@ def _run_find_pass(
                     rank_explain.append(f"code_exact={round(code_exact_bonus, 4)}")
                 if prf_support_bonus > 0:
                     rank_explain.append(f"prf_support={round(prf_support_bonus, 4)}")
+                if definition_title_bonus > 0:
+                    rank_explain.append(f"definition_title={round(definition_title_bonus, 4)}")
                 if length_penalty > 0:
                     rank_explain.append(f"length_penalty={round(length_penalty, 4)}")
 
@@ -2260,7 +2655,6 @@ def _run_find_pass(
                         "manual_id": manual_id,
                         "path": row.path,
                         "start_line": doc.start_line,
-                        "heading_id": doc.heading_id,
                         "json_path": None,
                         "title": doc.title,
                         "signals": sorted(signals),
@@ -2282,11 +2676,9 @@ def _run_find_pass(
                     item["required_terms"] = list(applied_required_terms)
                 inserted = _upsert_candidate_with_file_cap(
                     candidates=candidates,
-                    doc_terms_by_key=doc_terms_by_key,
                     file_candidate_keys=file_candidate_keys,
                     file_key=(manual_id, row.path),
                     candidate_row=item,
-                    matched_terms=matched_terms,
                     per_file_cap=per_file_cap,
                 )
                 if inserted and len(candidates) >= scan_hard_cap:
@@ -2331,14 +2723,17 @@ def _run_find_pass(
             normalized_text = doc.normalized_text
             if not normalized_text:
                 continue
+            if required_pattern_groups and not _matches_required_term_groups(normalized_text, required_pattern_groups):
+                continue
             compact_text = _compact_match_text(normalized_text)
             token_hits: dict[str, int] = {}
             for term in lexical_terms:
-                count = normalized_text.count(term)
-                if count <= 0:
+                raw_count = normalized_text.count(term)
+                if raw_count <= 0:
                     compact_term = _compact_match_text(term)
                     if compact_term:
-                        count = compact_text.count(compact_term)
+                        raw_count = compact_text.count(compact_term)
+                count = min(int(raw_count), LEXICAL_TOKEN_HIT_COUNT_CAP)
                 if count > 0:
                     token_hits[term] = count
             if not token_hits:
@@ -2378,7 +2773,6 @@ def _run_find_pass(
                     "manual_id": doc.manual_id,
                     "path": doc.path,
                     "start_line": doc.start_line,
-                    "heading_id": doc.heading_id,
                     "json_path": None,
                     "title": doc.title,
                     "signals": sorted(signals),
@@ -2403,7 +2797,6 @@ def _run_find_pass(
                 continue
             seen_keys.add(key)
             exploration_pool.append(item)
-            doc_terms_by_key[key] = set(matched_terms)
 
     if exploration_pool:
         exploration_quota = min(
@@ -2433,12 +2826,6 @@ def _run_find_pass(
     else:
         ordered = ordered_primary
 
-    ordered = _apply_late_rerank(
-        state=state,
-        query=query,
-        candidates=ordered,
-        doc_terms_by_key=doc_terms_by_key,
-    )
     ordered = ordered[:max_candidates]
     _annotate_lexical_candidate_scores(ordered)
     for item in ordered:
@@ -2749,9 +3136,19 @@ def _merge_required_term_pass_rows(
     merged_rows: dict[str, dict[str, Any]] = {}
     rrf_scores: dict[str, float] = {}
     pass_labels_by_key: dict[str, str] = {}
+    required_match_count_by_key: dict[str, int] = {}
+    single_pass_labels_by_key: dict[str, set[str]] = {}
     rrf_k = max(1, int(REQUIRED_TERM_RRF_K))
 
+    pass_counts = [len(rows) for _, _, rows in pass_rows]
+    total_pass_rows = sum(pass_counts)
+    dominant_pass_ratio = (max(pass_counts) / total_pass_rows) if total_pass_rows > 0 else 0.0
+    base_weight = float(REQUIRED_TERM_RRF_BASE_WEIGHT)
+    if dominant_pass_ratio >= REQUIRED_TERM_RRF_IMBALANCE_RATIO:
+        base_weight = min(base_weight, float(REQUIRED_TERM_RRF_BASE_WEIGHT_IMBALANCED))
+
     for pass_label, pass_weight, rows in pass_rows:
+        pass_match_count = _required_match_count_from_pass_label(pass_label)
         for rank, item in enumerate(rows, start=1):
             row = dict(item)
             key = _candidate_key(row)
@@ -2759,6 +3156,10 @@ def _merge_required_term_pass_rows(
             if prev is None or _prefer_candidate(row, prev):
                 merged_rows[key] = row
                 pass_labels_by_key[key] = pass_label
+            required_match_count_by_key[key] = max(required_match_count_by_key.get(key, 1), pass_match_count)
+            if "single_a" in pass_label or "single_b" in pass_label:
+                labels = single_pass_labels_by_key.setdefault(key, set())
+                labels.add(pass_label)
             rrf_scores[key] = rrf_scores.get(key, 0.0) + (float(pass_weight) / float(rrf_k + rank))
 
     if not merged_rows:
@@ -2781,8 +3182,17 @@ def _merge_required_term_pass_rows(
             base_max=base_max,
             rrf_min=rrf_min,
             rrf_max=rrf_max,
-            base_weight=REQUIRED_TERM_RRF_BASE_WEIGHT,
+            base_weight=base_weight,
         )
+        required_match_count = max(1, int(required_match_count_by_key.get(key, 1)))
+        labels_for_key = single_pass_labels_by_key.get(key, set())
+        if required_match_count < 2 and any("single_a" in label for label in labels_for_key) and any(
+            "single_b" in label for label in labels_for_key
+        ):
+            required_match_count = 2
+        required_match_bonus = REQUIRED_TERM_MATCH_BONUS if required_match_count >= 2 else 0.0
+        merged_score += required_match_bonus
+        item["_required_match_count"] = required_match_count
         item["_rank_score"] = merged_score
         item["score"] = round(merged_score, 4)
         _set_candidate_component_scores(
@@ -2800,9 +3210,13 @@ def _merge_required_term_pass_rows(
         item["ref"] = ref
         rank_explain = list(item.get("rank_explain") or [])
         rank_explain.append(f"required_pass={pass_labels_by_key.get(key, 'single')}")
+        rank_explain.append(f"required_match_count={required_match_count}")
+        if required_match_bonus > 0.0:
+            rank_explain.append(f"required_match_bonus={round(required_match_bonus, 4)}")
         rank_explain.append(f"required_rrf={round(rrf, 6)}")
         rank_explain.append(f"required_base_norm={round(base_norm, 4)}")
         rank_explain.append(f"required_rrf_norm={round(rrf_norm, 4)}")
+        rank_explain.append(f"required_rrf_alpha={round(max(0.0, min(1.0, base_weight)), 4)}")
         item["rank_explain"] = rank_explain
         rows_for_sort.append(item)
 
@@ -2916,6 +3330,406 @@ def _run_find_pass_lexical(
     )
 
 
+def _run_find_gate_pass(
+    *,
+    state: AppState,
+    manual_ids: list[str],
+    query: str,
+    max_stage: int,
+    budget_time_ms: int,
+    max_candidates: int,
+    required_terms: list[str],
+    prioritize_paths: dict[str, set[str]] | None,
+    allowed_paths: dict[str, set[str]] | None = None,
+) -> dict[str, Any]:
+    (
+        candidates,
+        scanned_files,
+        scanned_nodes,
+        warnings,
+        cutoff_reason,
+        unscanned,
+        index_rebuilt,
+        index_docs,
+        query_decomp_applied,
+        scoring_mode,
+        _pass_fallback_reason,
+    ) = _run_find_pass_lexical(
+        state=state,
+        manual_ids=manual_ids,
+        query=query,
+        max_stage=max_stage,
+        budget_time_ms=budget_time_ms,
+        max_candidates=max_candidates,
+        required_terms=required_terms,
+        allow_query_decomp=True,
+        prioritize_paths=prioritize_paths,
+        allowed_paths=allowed_paths,
+    )
+    total, file_bias, exception_hits = _candidate_metrics(candidates)
+    top_score = max((_candidate_rank_score(item) for item in candidates), default=0.0)
+    return {
+        "required_terms": list(required_terms),
+        "candidates": candidates,
+        "scanned_files": scanned_files,
+        "scanned_nodes": scanned_nodes,
+        "warnings": warnings,
+        "cutoff_reason": cutoff_reason,
+        "unscanned": unscanned,
+        "index_rebuilt": index_rebuilt,
+        "index_docs": index_docs,
+        "query_decomp_applied": query_decomp_applied,
+        "scoring_mode": scoring_mode,
+        "candidates_count": int(total),
+        "file_bias_ratio": float(file_bias),
+        "exception_hits": int(exception_hits),
+        "top_score": float(top_score),
+    }
+
+
+def _gate_overlap_ratio(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    *,
+    top_k: int,
+) -> float:
+    if top_k <= 0:
+        return 0.0
+    left_keys = {_candidate_key(item) for item in left[:top_k]}
+    right_keys = {_candidate_key(item) for item in right[:top_k]}
+    if not left_keys or not right_keys:
+        return 0.0
+    denom = max(1, min(len(left_keys), len(right_keys)))
+    return float(len(left_keys & right_keys) / float(denom))
+
+
+def _required_gate_fusion_weight(
+    *,
+    g0_run: dict[str, Any] | None,
+    required_run: dict[str, Any],
+) -> tuple[float, str]:
+    required_count = int(required_run.get("candidates_count") or 0)
+    if required_count <= 0:
+        return 0.0, "required_gate_empty"
+    if g0_run is None:
+        return 1.0, "required_only"
+    g0_count = int(g0_run.get("candidates_count") or 0)
+    g0_candidates = list(g0_run.get("candidates") or [])
+    required_candidates = list(required_run.get("candidates") or [])
+    if g0_count <= 0:
+        return 1.10, "g0_empty_required_promoted"
+
+    ratio = float(required_count / max(1, g0_count))
+    overlap = _gate_overlap_ratio(
+        g0_candidates,
+        required_candidates,
+        top_k=max(1, int(GATE_FUSION_TOP_K)),
+    )
+    novelty = max(0.0, 1.0 - overlap)
+    weight = 1.0
+    reasons: list[str] = []
+    if ratio < GATE_FUSION_LOW_RATIO:
+        weight -= 0.25
+        reasons.append("low_required_ratio")
+    elif ratio >= GATE_FUSION_HIGH_RATIO:
+        weight += 0.15
+        reasons.append("high_required_ratio")
+    if overlap >= 0.90:
+        weight -= 0.20
+        reasons.append("high_overlap")
+    elif novelty >= 0.50:
+        weight += 0.10
+        reasons.append("high_novelty")
+    weight = max(
+        float(GATE_FUSION_REQUIRED_WEIGHT_MIN),
+        min(float(GATE_FUSION_REQUIRED_WEIGHT_MAX), float(weight)),
+    )
+    if not reasons:
+        reasons.append("balanced")
+    return weight, "+".join(reasons)
+
+
+def _diagnose_required_effect_status(
+    *,
+    requested_required_terms: list[str],
+    required_terms_missing: list[str],
+    applied_required_terms: list[str],
+    strict_required_candidates: int,
+    filtered_required_candidates: int,
+    g0_candidates: int,
+) -> tuple[str, str | None]:
+    if not requested_required_terms:
+        return "required_effective", None
+
+    missing = [term for term in required_terms_missing if term]
+    if missing and len(missing) >= len(requested_required_terms):
+        return "required_none_matched", f"required_terms_not_found_in_manual_scope:{','.join(missing)}"
+
+    strict_count = max(0, int(strict_required_candidates))
+    filtered_count = max(0, int(filtered_required_candidates))
+    g0_count = max(0, int(g0_candidates))
+    terms_changed = list(requested_required_terms) != list(applied_required_terms)
+
+    if missing:
+        return "term_dropped_or_weakened", f"some_required_terms_not_found_in_manual_scope:{','.join(missing)}"
+    if strict_count <= 0 and filtered_count > 0:
+        return "term_dropped_or_weakened", "strict_required_zero_candidates_but_filtered_gate_has_hits"
+    if strict_count <= 0 and filtered_count <= 0:
+        if g0_count > 0:
+            return "required_none_matched", "required_terms_zero_candidates_in_manual_scope"
+        return "required_none_matched", "no_candidates_across_g0_and_greq"
+    if terms_changed and filtered_count <= 0:
+        return "term_dropped_or_weakened", "filtered_required_zero_after_df_guard"
+    if terms_changed and filtered_count < strict_count:
+        return "term_dropped_or_weakened", "filtered_required_weaker_than_strict_after_df_guard"
+    return "required_effective", None
+
+
+def _required_signal_hits_in_top_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    top_k: int,
+) -> int:
+    if top_k <= 0 or not candidates:
+        return 0
+    hits = 0
+    for item in candidates[:top_k]:
+        signals = set(item.get("signals") or [])
+        ref = item.get("ref")
+        if isinstance(ref, dict):
+            signals.update(ref.get("signals") or [])
+        if "required_term" in signals or "required_term_and" in signals:
+            hits += 1
+    return hits
+
+
+def _merge_gate_unscanned_sections(gate_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _merge_required_unscanned_sections([list(row.get("unscanned") or []) for row in gate_runs])
+
+
+def _enforce_gate_unique_top_candidates(
+    *,
+    selected_rows: list[dict[str, Any]],
+    all_rows: list[dict[str, Any]],
+    gate_runs: list[dict[str, Any]],
+    max_candidates: int,
+) -> tuple[list[dict[str, Any]], set[str], list[dict[str, Any]]]:
+    if max_candidates <= 0:
+        return [], set(), []
+    selected = list(selected_rows[:max_candidates])
+    selected_keys = {_candidate_key(item) for item in selected}
+    all_by_key = {_candidate_key(item): item for item in all_rows}
+    guaranteed_keys: set[str] = set()
+    injected_events: list[dict[str, Any]] = []
+
+    for gate_run in gate_runs:
+        gate_label = str(gate_run.get("gate") or "")
+        gate_candidates = list(gate_run.get("candidates") or [])
+        if not gate_label or not gate_candidates:
+            continue
+        top_row = gate_candidates[0]
+        top_key = _candidate_key(top_row)
+        guaranteed_keys.add(top_key)
+        if top_key in selected_keys:
+            injected_events.append({"gate": gate_label, "candidate_key": top_key, "injected": False})
+            continue
+
+        replacement_key: str | None = None
+        if len(selected) >= max_candidates:
+            replace_index: int | None = None
+            for idx in range(len(selected) - 1, -1, -1):
+                row_key = _candidate_key(selected[idx])
+                if row_key not in guaranteed_keys:
+                    replace_index = idx
+                    replacement_key = row_key
+                    break
+            if replace_index is None:
+                injected_events.append(
+                    {
+                        "gate": gate_label,
+                        "candidate_key": top_key,
+                        "injected": False,
+                        "reason": "max_candidates_all_guaranteed",
+                    }
+                )
+                continue
+            selected.pop(replace_index)
+            selected_keys.discard(replacement_key or "")
+
+        selected.append(dict(all_by_key.get(top_key, top_row)))
+        selected_keys.add(top_key)
+        event: dict[str, Any] = {"gate": gate_label, "candidate_key": top_key, "injected": True}
+        if replacement_key:
+            event["replaced_candidate_key"] = replacement_key
+        injected_events.append(event)
+
+    selected.sort(key=_candidate_sort_key)
+    return selected[:max_candidates], guaranteed_keys, injected_events
+
+
+def _fuse_gate_runs_rrf(
+    *,
+    gate_runs: list[dict[str, Any]],
+    max_candidates: int,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+    list[dict[str, Any]],
+    str,
+    str,
+    bool,
+    str | None,
+    str,
+    list[dict[str, Any]],
+    set[str],
+]:
+    ensure(bool(gate_runs), "conflict", "gate_runs is empty")
+    applied_max_candidates = max(1, int(max_candidates))
+    merged_rows: dict[str, dict[str, Any]] = {}
+    rrf_scores: dict[str, float] = {}
+    contributions: dict[str, list[dict[str, Any]]] = {}
+    gate_weight_map: dict[str, dict[str, Any]] = {}
+    g0_run = next((row for row in gate_runs if str(row.get("gate") or "") == "g0"), None)
+
+    for gate_run in gate_runs:
+        gate_label = str(gate_run.get("gate") or "")
+        if not gate_label:
+            continue
+        if gate_label == "g0":
+            weight = float(GATE_FUSION_G0_WEIGHT)
+            reason = "baseline"
+        else:
+            weight, reason = _required_gate_fusion_weight(g0_run=g0_run, required_run=gate_run)
+        gate_weight_map[gate_label] = {"weight": round(float(weight), 4), "reason": reason}
+        if weight <= 0.0:
+            continue
+        for rank, item in enumerate(list(gate_run.get("candidates") or []), start=1):
+            row = dict(item)
+            key = _candidate_key(row)
+            prev = merged_rows.get(key)
+            if prev is None or _prefer_candidate(row, prev):
+                merged_rows[key] = row
+            contribution = float(weight) / float(max(1, int(GATE_FUSION_RRF_K)) + rank)
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + contribution
+            contributions.setdefault(key, []).append(
+                {
+                    "gate": gate_label,
+                    "rank": int(rank),
+                    "weight": round(float(weight), 4),
+                    "rrf": round(float(contribution), 8),
+                }
+            )
+
+    if not merged_rows:
+        base_fallback = g0_run or gate_runs[0]
+        fallback_candidates = list(base_fallback.get("candidates") or [])[:applied_max_candidates]
+        return (
+            fallback_candidates,
+            gate_weight_map,
+            [],
+            "g0",
+            "required_gate_empty_fallback_to_g0",
+            True,
+            "zero_candidates_with_required_terms",
+            str(base_fallback.get("scoring_mode") or "lexical"),
+            _merge_gate_unscanned_sections(gate_runs),
+            set(),
+        )
+
+    base_scores = {key: _candidate_rank_score(row) for key, row in merged_rows.items()}
+    base_min = min(base_scores.values(), default=0.0)
+    base_max = max(base_scores.values(), default=0.0)
+    rrf_min = min(rrf_scores.values(), default=0.0)
+    rrf_max = max(rrf_scores.values(), default=0.0)
+
+    rows_for_sort: list[dict[str, Any]] = []
+    for key, row in merged_rows.items():
+        base_score = float(base_scores.get(key, 0.0))
+        rrf_score = float(rrf_scores.get(key, 0.0))
+        merged_score, base_norm, rrf_norm = _blend_query_decomp_rrf_score(
+            base_score=base_score,
+            rrf_score=rrf_score,
+            base_min=base_min,
+            base_max=base_max,
+            rrf_min=rrf_min,
+            rrf_max=rrf_max,
+            base_weight=float(GATE_FUSION_BASE_WEIGHT),
+        )
+        row["_rank_score"] = merged_score
+        row["score"] = round(float(merged_score), 4)
+        _set_candidate_component_scores(
+            row,
+            score_lexical=merged_score,
+            score_fused=merged_score,
+        )
+        signals = set(row.get("signals") or [])
+        signals.add("gate_rrf")
+        row["signals"] = sorted(signals)
+        ref = dict(row.get("ref") or {})
+        ref_signals = set(ref.get("signals") or [])
+        ref_signals.add("gate_rrf")
+        ref["signals"] = sorted(ref_signals)
+        row["ref"] = ref
+        rank_explain = list(row.get("rank_explain") or [])
+        rank_explain.append(f"gate_rrf={round(rrf_score, 8)}")
+        rank_explain.append(f"gate_base_norm={round(base_norm, 4)}")
+        rank_explain.append(f"gate_rrf_norm={round(rrf_norm, 4)}")
+        row["rank_explain"] = rank_explain
+        rows_for_sort.append(row)
+
+    rows_for_sort.sort(key=_candidate_sort_key)
+    selected_rows = rows_for_sort[:applied_max_candidates]
+    selected_rows, guaranteed_keys, guarantee_events = _enforce_gate_unique_top_candidates(
+        selected_rows=selected_rows,
+        all_rows=rows_for_sort,
+        gate_runs=[row for row in gate_runs if int(row.get("candidates_count") or 0) > 0],
+        max_candidates=applied_max_candidates,
+    )
+
+    fusion_debug_rows: list[dict[str, Any]] = []
+    guaranteed_events_by_key: dict[str, dict[str, Any]] = {}
+    for event in guarantee_events:
+        key = str(event.get("candidate_key") or "")
+        if key and key not in guaranteed_events_by_key:
+            guaranteed_events_by_key[key] = event
+    for rank, row in enumerate(selected_rows, start=1):
+        key = _candidate_key(row)
+        fusion_debug_rows.append(
+            {
+                "candidate_key": key,
+                "rank": int(rank),
+                "score": round(float(_candidate_rank_score(row)), 4),
+                "ref": row.get("ref"),
+                "contributions": list(contributions.get(key) or []),
+                "guaranteed_top": key in guaranteed_keys,
+                "guaranteed_injected": bool((guaranteed_events_by_key.get(key) or {}).get("injected") is True),
+            }
+        )
+
+    required_runs = [row for row in gate_runs if str(row.get("gate") or "") != "g0"]
+    required_has_hits = any(int(row.get("candidates_count") or 0) > 0 for row in required_runs)
+    selected_gate = "g_req" if required_has_hits else "g0"
+    gate_selection_reason = (
+        "rrf_fusion_with_required_gate" if required_has_hits else "required_gate_empty_fallback_to_g0"
+    )
+    required_relaxed = bool(required_runs) and not required_has_hits
+    required_relax_reason = "zero_candidates_with_required_terms" if required_relaxed else None
+    scoring_mode = "gate_rrf" if len(gate_runs) > 1 else str(gate_runs[0].get("scoring_mode") or "lexical")
+
+    return (
+        selected_rows,
+        gate_weight_map,
+        fusion_debug_rows,
+        selected_gate,
+        gate_selection_reason,
+        required_relaxed,
+        required_relax_reason,
+        scoring_mode,
+        _merge_gate_unscanned_sections(gate_runs),
+        guaranteed_keys,
+    )
+
+
 def manual_find(
     state: AppState,
     query: str,
@@ -2926,6 +3740,7 @@ def manual_find(
     budget: dict[str, Any] | None = None,
     include_claim_graph: bool | None = None,
     use_cache: bool | None = None,
+    compact: bool | None = None,
     record_adaptive_stats: bool = True,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
@@ -2939,9 +3754,32 @@ def manual_find(
             only_unscanned_from_trace_id,
             name="only_unscanned_from_trace_id",
         )
+    if required_terms is None:
+        raise ToolError("invalid_parameter", "required_terms is required")
+    required_terms_source = "user"
+    required_terms_decision_reason: str | None = "provided_by_caller"
     applied_required_terms = _parse_required_terms_param(required_terms)
+    if not applied_required_terms:
+        raise ToolError("invalid_parameter", "required_terms must contain at least 1 item")
+    requested_required_terms = list(applied_required_terms)
+    required_terms_df_filtered: list[dict[str, Any]] = []
+    applied_required_terms_relaxed = False
+    required_terms_relax_reason: str | None = None
+    required_effect_status = "required_effective"
+    required_failure_reason: str | None = None
+    required_strict_candidates = 0
+    required_filtered_candidates = 0
+    required_terms_match_stats: list[dict[str, Any]] = []
+    required_terms_missing: list[str] = []
+    required_top_k = 0
+    required_top_hits = 0
+    selected_gate = "single"
+    gate_selection_reason = "single_pass"
+    gate_runs: list[dict[str, Any]] = []
+    gate_eval_runs: list[dict[str, Any]] = []
+    fusion_debug_rows: list[dict[str, Any]] = []
+    fused_gate_top_keys: set[str] = set()
     requested_expand_scope = expand_scope if expand_scope is not None else None
-    should_expand_scope = bool(requested_expand_scope)
     applied_expand_scope = False
     applied_include_claim_graph = _parse_bool_param(
         include_claim_graph,
@@ -2953,7 +3791,12 @@ def manual_find(
         name="use_cache",
         default=state.config.sem_cache_enabled,
     )
-    applied_max_stage = 4 if should_expand_scope else 3
+    applied_compact = _parse_bool_param(
+        compact,
+        name="compact",
+        default=False,
+    )
+    applied_max_stage = 3
 
     if budget is None:
         budget_obj: dict[str, Any] = {}
@@ -2976,8 +3819,8 @@ def manual_find(
     )
 
     selected_manual_ids = [applied_manual_id]
-    stage4_scope_ids: list[str] = []
     cache_manual_ids = list(selected_manual_ids)
+    required_terms_index: SparseIndex | None = None
     prioritize_paths: dict[str, set[str]] | None = None
     escalation_reasons: list[str] = []
     use_semantic_cache = applied_use_cache and not bool(applied_only_unscanned_trace_id)
@@ -2988,21 +3831,36 @@ def manual_find(
     sem_cache_mode = "miss" if use_semantic_cache else "bypass"
     sem_cache_score: float | None = None
     latency_saved_ms: int | None = None
-    corrective_triggered = False
-    corrective_reasons: list[str] = []
     ensure(
         _manual_exists(state.config.manuals_root, applied_manual_id),
         "not_found",
         "manual_id not found",
         {"manual_id": applied_manual_id},
     )
-    if should_expand_scope and state.config.manual_find_stage4_enabled:
-        stage4_scope_ids = _stage4_neighbor_manual_ids(
-            state,
-            manual_id=applied_manual_id,
-            limit=state.config.manual_find_stage4_neighbor_limit,
+    if applied_required_terms:
+        if required_terms_index is None:
+            required_terms_fp = _manuals_fingerprint(state, selected_manual_ids)
+            required_terms_index, _ = state.sparse_index.get_or_build(
+                manual_ids=selected_manual_ids,
+                fingerprint=required_terms_fp,
+            )
+        required_terms_match_stats = _required_term_match_stats(
+            required_terms=requested_required_terms,
+            sparse_index=required_terms_index,
         )
-    cache_manual_ids = selected_manual_ids + stage4_scope_ids
+        required_terms_missing = [
+            str(item.get("term") or "")
+            for item in required_terms_match_stats
+            if int(item.get("matched_docs") or 0) <= 0 and str(item.get("term") or "")
+        ]
+        if required_terms_missing:
+            escalation_reasons.append("required_terms_missing_from_manual_scope")
+        applied_required_terms, required_terms_df_filtered = _filter_required_terms_by_df(
+            required_terms=applied_required_terms,
+            sparse_index=required_terms_index,
+        )
+        if required_terms_df_filtered:
+            escalation_reasons.append("required_terms_df_filtered")
 
     if applied_only_unscanned_trace_id:
         trace = state.traces.get(applied_only_unscanned_trace_id)
@@ -3022,12 +3880,15 @@ def manual_find(
             escalation_reasons.append("prioritized_unscanned_sections")
 
     if use_semantic_cache:
+        # Cache scope must preserve caller intent (requested terms),
+        # otherwise different requested terms that collapse after DF guard
+        # can incorrectly share one cached payload.
+        cache_required_terms = requested_required_terms
         cache_scope_key = _manual_find_scope_key(
             manual_id=applied_manual_id,
-            expand_scope=should_expand_scope,
             max_candidates=max_candidates,
             budget_time_ms=budget_time_ms,
-            required_terms=applied_required_terms,
+            required_terms=cache_required_terms,
         )
         cache_query = _cacheable_query(query)
         manuals_fp_lookup = _manuals_fingerprint(state, cache_manual_ids)
@@ -3039,6 +3900,10 @@ def manual_find(
         if exact_cached.hit:
             cached_trace_payload, source_latency_ms = _cached_trace_payload_and_source_latency(exact_cached.value)
             if cached_trace_payload is not None:
+                cached_trace_payload = _apply_cached_request_overrides(
+                    trace_payload=cached_trace_payload,
+                    requested_expand_scope=requested_expand_scope,
+                )
                 cached_summary = cached_trace_payload.get("summary")
                 if isinstance(cached_summary, dict) and _cached_summary_is_acceptable(state, cached_summary):
                     sem_cache_hit = True
@@ -3075,6 +3940,7 @@ def manual_find(
                         trace_id=trace_id,
                         trace_payload=cached_trace_payload,
                         include_claim_graph=applied_include_claim_graph,
+                        compact=applied_compact,
                     )
                 sem_cache_mode = "guard_revalidate"
 
@@ -3087,6 +3953,10 @@ def manual_find(
         if semantic_cached.hit:
             cached_trace_payload, source_latency_ms = _cached_trace_payload_and_source_latency(semantic_cached.value)
             if cached_trace_payload is not None:
+                cached_trace_payload = _apply_cached_request_overrides(
+                    trace_payload=cached_trace_payload,
+                    requested_expand_scope=requested_expand_scope,
+                )
                 cached_summary = cached_trace_payload.get("summary")
                 if isinstance(cached_summary, dict) and _cached_summary_is_acceptable(state, cached_summary):
                     sem_cache_hit = True
@@ -3123,33 +3993,125 @@ def manual_find(
                         trace_id=trace_id,
                         trace_payload=cached_trace_payload,
                         include_claim_graph=applied_include_claim_graph,
+                        compact=applied_compact,
                     )
                 sem_cache_mode = "guard_revalidate"
 
+    applied_required_terms_for_gate = list(applied_required_terms[:REQUIRED_TERMS_MAX_ITEMS])
+    requested_required_terms_for_gate = list(requested_required_terms[:REQUIRED_TERMS_MAX_ITEMS])
+    strict_gate_diag_result: dict[str, Any] | None = None
+    gate_plan: list[tuple[str, list[str]]] = [("g0", [])]
+    if applied_required_terms_for_gate:
+        gate_plan.append(("g_req", list(applied_required_terms_for_gate)))
+
+    for gate_label, gate_required_terms in gate_plan:
+        gate_result = _run_find_gate_pass(
+            state=state,
+            manual_ids=selected_manual_ids,
+            query=query,
+            max_stage=applied_max_stage,
+            budget_time_ms=budget_time_ms,
+            max_candidates=max_candidates,
+            required_terms=gate_required_terms,
+            prioritize_paths=prioritize_paths,
+            allowed_paths=None,
+        )
+        gate_result["gate"] = gate_label
+        gate_eval_runs.append(gate_result)
+
+    if (
+        requested_required_terms_for_gate
+        and requested_required_terms_for_gate != applied_required_terms_for_gate
+    ):
+        strict_gate_diag_result = _run_find_gate_pass(
+            state=state,
+            manual_ids=selected_manual_ids,
+            query=query,
+            max_stage=applied_max_stage,
+            budget_time_ms=budget_time_ms,
+            max_candidates=max_candidates,
+            required_terms=requested_required_terms_for_gate,
+            prioritize_paths=prioritize_paths,
+            allowed_paths=None,
+        )
+
+    g0_gate_eval = next((row for row in gate_eval_runs if str(row.get("gate") or "") == "g0"), None)
+    g_req_gate_eval = next((row for row in gate_eval_runs if str(row.get("gate") or "") == "g_req"), None)
+    g0_candidates = int((g0_gate_eval or {}).get("candidates_count") or 0)
+    required_filtered_candidates = int((g_req_gate_eval or {}).get("candidates_count") or 0)
+    if strict_gate_diag_result is not None:
+        required_strict_candidates = int(strict_gate_diag_result.get("candidates_count") or 0)
+    elif requested_required_terms_for_gate == applied_required_terms_for_gate:
+        required_strict_candidates = int(required_filtered_candidates)
+    required_effect_status, required_failure_reason = _diagnose_required_effect_status(
+        requested_required_terms=requested_required_terms_for_gate,
+        required_terms_missing=required_terms_missing,
+        applied_required_terms=applied_required_terms_for_gate,
+        strict_required_candidates=required_strict_candidates,
+        filtered_required_candidates=required_filtered_candidates,
+        g0_candidates=g0_candidates,
+    )
+    if required_effect_status != "required_effective":
+        escalation_reasons.append(f"required_effect_{required_effect_status}")
+
     (
         candidates,
-        scanned_files,
-        scanned_nodes,
-        warnings,
-        cutoff_reason,
-        unscanned,
-        index_rebuilt,
-        index_docs,
-        query_decomp_applied,
+        gate_weight_map,
+        fusion_debug_rows,
+        selected_gate,
+        gate_selection_reason,
+        fused_required_relaxed,
+        fused_required_relax_reason,
         scoring_mode,
-        _pass_fallback_reason,
-    ) = _run_find_pass_lexical(
-        state=state,
-        manual_ids=selected_manual_ids,
-        query=query,
-        max_stage=applied_max_stage,
-        budget_time_ms=budget_time_ms,
+        unscanned,
+        fused_gate_top_keys,
+    ) = _fuse_gate_runs_rrf(
+        gate_runs=gate_eval_runs,
         max_candidates=max_candidates,
-        required_terms=applied_required_terms,
-        allow_query_decomp=True,
-        prioritize_paths=prioritize_paths,
-        allowed_paths=None,
     )
+    scanned_files = max((int(row.get("scanned_files") or 0) for row in gate_eval_runs), default=0)
+    scanned_nodes = max((int(row.get("scanned_nodes") or 0) for row in gate_eval_runs), default=0)
+    warnings = max((int(row.get("warnings") or 0) for row in gate_eval_runs), default=0)
+    cutoff_reason = next((row.get("cutoff_reason") for row in gate_eval_runs if row.get("cutoff_reason") is not None), None)
+    index_rebuilt = any(bool(row.get("index_rebuilt") or False) for row in gate_eval_runs)
+    index_docs = max((int(row.get("index_docs") or 0) for row in gate_eval_runs), default=0)
+    query_decomp_applied = any(bool(row.get("query_decomp_applied") or False) for row in gate_eval_runs)
+
+    for gate_result in gate_eval_runs:
+        gate_label = str(gate_result.get("gate") or "")
+        weight_meta = gate_weight_map.get(gate_label, {"weight": 0.0, "reason": "none"})
+        weight_value = float(weight_meta.get("weight") or 0.0)
+        has_candidates = int(gate_result.get("candidates_count") or 0) > 0
+        gate_runs.append(
+            {
+                "gate": gate_label,
+                "required_terms": list(gate_result.get("required_terms") or []),
+                "candidates_count": int(gate_result.get("candidates_count") or 0),
+                "file_bias_ratio": round(float(gate_result.get("file_bias_ratio") or 0.0), 4),
+                "exception_hits": int(gate_result.get("exception_hits") or 0),
+                "top_score": round(float(gate_result.get("top_score") or 0.0), 4),
+                "scoring_mode": str(gate_result.get("scoring_mode") or "lexical"),
+                "cutoff_reason": gate_result.get("cutoff_reason"),
+                "weight": round(weight_value, 4),
+                "weight_reason": str(weight_meta.get("reason") or "none"),
+                "selected": bool(weight_value > 0.0 and (gate_label == "g0" or has_candidates)),
+            }
+        )
+
+    if fused_required_relaxed:
+        applied_required_terms_relaxed = True
+        required_terms_relax_reason = fused_required_relax_reason
+        escalation_reasons.append("required_terms_relaxed_after_gate_fallback")
+
+    if (
+        applied_required_terms_relaxed
+        and len(applied_required_terms) >= 2
+        and required_terms_relax_reason == "zero_candidates_with_required_terms"
+        and candidates
+    ):
+        candidates, relaxed_filtered = _filter_relaxed_candidates(candidates)
+        if relaxed_filtered:
+            escalation_reasons.append("relaxed_noise_filtered")
 
     total, file_bias, exception_hits = _candidate_metrics(candidates)
     should_expand = _should_expand_scope(
@@ -3159,98 +4121,85 @@ def manual_find(
         candidate_low_threshold=candidate_low_threshold,
         file_bias_threshold=file_bias_threshold,
     )
-    provisional_claim_graph = _build_claim_graph(
-        query=query,
-        candidates=candidates,
-    )
-    provisional_summary = _build_summary(
-        claim_graph=provisional_claim_graph,
-        candidates=candidates,
-        scanned_files=scanned_files,
-        scanned_nodes=scanned_nodes,
-        candidate_low_threshold=candidate_low_threshold,
-        file_bias_threshold=file_bias_threshold,
-    )
-    corrective_triggered, corrective_reasons = _needs_corrective_escalation(
-        state,
-        summary=provisional_summary,
-        coverage_ratio=_claim_coverage_ratio(provisional_claim_graph),
-        top_margin=_top_score_margin(candidates),
-        total=total,
-    )
-    stage4_needed = should_expand or corrective_triggered
-    if corrective_triggered:
-        escalation_reasons.extend(corrective_reasons)
-    stage4_executed = False
-    if applied_manual_id and stage4_needed:
-        if should_expand_scope and state.config.manual_find_stage4_enabled and stage4_scope_ids:
-            (
-                stage4_candidates,
-                stage4_scanned_files,
-                stage4_scanned_nodes,
-                stage4_warnings,
-                stage4_cutoff_reason,
-                stage4_unscanned,
-                stage4_index_rebuilt,
-                stage4_index_docs,
-                _,
-                stage4_scoring_mode,
-                _stage4_fallback_reason,
-            ) = _run_find_pass_lexical(
-                state=state,
-                manual_ids=stage4_scope_ids,
-                query=query,
-                max_stage=4,
-                budget_time_ms=max(1, int(state.config.manual_find_stage4_budget_time_ms)),
-                max_candidates=max_candidates,
-                required_terms=applied_required_terms,
-                allow_query_decomp=False,
-                prioritize_paths=None,
-                allowed_paths=None,
-            )
-            candidates = _merge_candidates(
-                candidates,
-                stage4_candidates,
-                score_penalty=state.config.manual_find_stage4_score_penalty,
-                secondary_signal="expanded_scope",
-                max_candidates=max_candidates,
-            )
-            scanned_files += stage4_scanned_files
-            scanned_nodes += stage4_scanned_nodes
-            warnings += stage4_warnings
-            index_rebuilt = index_rebuilt or stage4_index_rebuilt
-            index_docs = max(index_docs, stage4_index_docs)
-            if cutoff_reason is None:
-                cutoff_reason = stage4_cutoff_reason
-            unscanned.extend(stage4_unscanned)
-            stage4_executed = True
-            applied_expand_scope = True
-            escalation_reasons.append("stage4_executed")
-            scoring_mode = stage4_scoring_mode
-        else:
-            if total == 0:
-                escalation_reasons.append("zero_candidates")
-            if total < candidate_low_threshold:
-                escalation_reasons.append("low_candidates")
-            if total >= 5 and file_bias >= file_bias_threshold:
-                escalation_reasons.append("file_bias")
-            if corrective_triggered:
-                escalation_reasons.append("corrective_stage_cap")
-            cutoff_reason = cutoff_reason or "stage_cap"
-            escalation_reasons.append("stage_cap")
-            if should_expand_scope and not stage4_scope_ids:
-                escalation_reasons.append("stage4_scope_empty")
-            pending_scope_ids = stage4_scope_ids or [mid for mid in discover_manual_ids(state.config.manuals_root) if mid != applied_manual_id]
-            for extra_id in pending_scope_ids:
-                for row in list_manual_files(state.config.manuals_root, manual_id=extra_id):
-                    unscanned.append({"manual_id": extra_id, "path": row.path, "reason": "stage_cap"})
+    if applied_manual_id and should_expand:
+        if total == 0:
+            escalation_reasons.append("zero_candidates")
+        if total < candidate_low_threshold:
+            escalation_reasons.append("low_candidates")
+        if total >= 5 and file_bias >= file_bias_threshold:
+            escalation_reasons.append("file_bias")
+        cutoff_reason = cutoff_reason or "stage_cap"
+        escalation_reasons.append("stage_cap")
+        pending_scope_ids = [mid for mid in discover_manual_ids(state.config.manuals_root) if mid != applied_manual_id]
+        for extra_id in pending_scope_ids:
+            for row in list_manual_files(state.config.manuals_root, manual_id=extra_id):
+                unscanned.append({"manual_id": extra_id, "path": row.path, "reason": "stage_cap"})
     candidates = _apply_file_diversity_rerank(candidates)
-    candidates, dynamic_cutoff_applied_post_stage4 = _apply_dynamic_candidate_cutoff(
+    pre_cutoff_candidates = list(candidates)
+    candidates, dynamic_cutoff_applied = _apply_dynamic_candidate_cutoff(
         candidates,
         requested_max_candidates=max_candidates,
     )
-    if dynamic_cutoff_applied_post_stage4 and cutoff_reason is None:
+    if fused_gate_top_keys and candidates:
+        candidates, _unused_guaranteed, final_injected_events = _enforce_gate_unique_top_candidates(
+            selected_rows=candidates,
+            all_rows=pre_cutoff_candidates,
+            gate_runs=[row for row in gate_eval_runs if int(row.get("candidates_count") or 0) > 0],
+            max_candidates=max(1, len(candidates)),
+        )
+        if any(bool(item.get("injected")) for item in final_injected_events):
+            escalation_reasons.append("gate_unique_top_injected_after_cutoff")
+            injected_keys = {
+                str(item.get("candidate_key") or "")
+                for item in final_injected_events
+                if bool(item.get("injected")) and str(item.get("candidate_key") or "")
+            }
+            fusion_debug_by_key = {
+                str(item.get("candidate_key") or ""): dict(item)
+                for item in fusion_debug_rows
+                if str(item.get("candidate_key") or "")
+            }
+            for key in injected_keys:
+                row = fusion_debug_by_key.get(key)
+                if row is None:
+                    fusion_debug_by_key[key] = {
+                        "candidate_key": key,
+                        "contributions": [],
+                        "guaranteed_top": key in fused_gate_top_keys,
+                        "guaranteed_injected": True,
+                    }
+                else:
+                    row["guaranteed_injected"] = True
+            fusion_debug_rows = list(fusion_debug_by_key.values())
+    if dynamic_cutoff_applied and cutoff_reason is None:
         cutoff_reason = "dynamic_cutoff"
+    if fusion_debug_rows:
+        fusion_debug_by_key = {
+            str(item.get("candidate_key") or ""): dict(item)
+            for item in fusion_debug_rows
+            if str(item.get("candidate_key") or "")
+        }
+        rebuilt_debug_rows: list[dict[str, Any]] = []
+        for rank, item in enumerate(candidates, start=1):
+            key = _candidate_key(item)
+            base_debug = dict(fusion_debug_by_key.get(key) or {})
+            base_debug["candidate_key"] = key
+            base_debug["rank"] = int(rank)
+            base_debug["score"] = round(float(_candidate_rank_score(item)), 4)
+            base_debug["ref"] = item.get("ref")
+            base_debug["guaranteed_top"] = bool(base_debug.get("guaranteed_top") or (key in fused_gate_top_keys))
+            base_debug["guaranteed_injected"] = bool(base_debug.get("guaranteed_injected") is True)
+            if "contributions" not in base_debug or not isinstance(base_debug.get("contributions"), list):
+                base_debug["contributions"] = []
+            rebuilt_debug_rows.append(base_debug)
+        fusion_debug_rows = rebuilt_debug_rows
+    required_top_k = min(max(0, int(REQUIRED_EFFECT_TOP_K)), len(candidates))
+    required_top_hits = _required_signal_hits_in_top_candidates(candidates, top_k=required_top_k)
+    if requested_required_terms_for_gate and required_effect_status == "required_effective" and required_top_k > 0:
+        if required_top_hits <= 0:
+            required_effect_status = "required_fallback"
+            required_failure_reason = f"required_terms_not_in_top_{required_top_k}"
+            escalation_reasons.append("required_effect_required_fallback")
     for item in candidates:
         final_score = _candidate_rank_score(item)
         item["score"] = round(final_score, 4)
@@ -3282,7 +4231,30 @@ def manual_find(
         summary=summary,
         query=query,
         max_stage=applied_max_stage,
+        manual_id=applied_manual_id,
+        candidates=candidates,
     )
+    if required_effect_status in {"term_dropped_or_weakened", "required_none_matched"}:
+        rewrite_retry_action = {
+            "type": "manual_find",
+            "confidence": 0.6,
+            "params": {
+                "query": query,
+                "manual_id": applied_manual_id,
+                "required_terms": requested_required_terms_for_gate,
+                "expand_scope": False,
+                "use_cache": False,
+            },
+        }
+        if not any(
+            item.get("type") == "manual_find"
+            and isinstance(item.get("params"), dict)
+            and (item.get("params") or {}).get("manual_id") == applied_manual_id
+            and (item.get("params") or {}).get("query") == query
+            for item in next_actions
+            if isinstance(item, dict)
+        ):
+            next_actions.append(rewrite_retry_action)
     evidences_by_id = {item["evidence_id"]: item for item in claim_graph.get("evidences", [])}
     conflict_edges = [item for item in claim_graph.get("edges", []) if item.get("relation") == "contradicts"]
     followup_edges = [item for item in claim_graph.get("edges", []) if item.get("relation") == "requires_followup"]
@@ -3330,9 +4302,43 @@ def manual_find(
             "manual_id": applied_manual_id,
             "requested_expand_scope": requested_expand_scope,
             "expand_scope": applied_expand_scope,
+            "required_terms_source": required_terms_source,
+            "required_terms_decision_reason": required_terms_decision_reason,
+            "requested_required_terms": requested_required_terms,
             "required_terms": applied_required_terms,
+            "required_terms_df_filtered": required_terms_df_filtered,
+            "required_terms_relaxed": applied_required_terms_relaxed,
+            "required_terms_relax_reason": required_terms_relax_reason,
+            "required_effect_status": required_effect_status,
+            "required_failure_reason": required_failure_reason,
+            "required_strict_candidates": required_strict_candidates,
+            "required_filtered_candidates": required_filtered_candidates,
+            "required_terms_match_stats": required_terms_match_stats,
+            "required_terms_missing": required_terms_missing,
+            "required_top_k": required_top_k,
+            "required_top_hits": required_top_hits,
+            "selected_gate": selected_gate,
+            "gate_selection_reason": gate_selection_reason,
         },
+        "required_terms_source": required_terms_source,
+        "required_terms_decision_reason": required_terms_decision_reason,
+        "requested_required_terms": requested_required_terms,
         "required_terms": applied_required_terms,
+        "required_terms_df_filtered": required_terms_df_filtered,
+        "required_terms_relaxed": applied_required_terms_relaxed,
+        "required_terms_relax_reason": required_terms_relax_reason,
+        "required_effect_status": required_effect_status,
+        "required_failure_reason": required_failure_reason,
+        "required_strict_candidates": required_strict_candidates,
+        "required_filtered_candidates": required_filtered_candidates,
+        "required_terms_match_stats": required_terms_match_stats,
+        "required_terms_missing": required_terms_missing,
+        "required_top_k": required_top_k,
+        "required_top_hits": required_top_hits,
+        "selected_gate": selected_gate,
+        "gate_selection_reason": gate_selection_reason,
+        "gate_runs": gate_runs,
+        "fusion_debug": fusion_debug_rows,
         "claim_graph": claim_graph,
         "summary": summary,
         "next_actions": next_actions,
@@ -3394,10 +4400,7 @@ def manual_find(
             scoring_mode=scoring_mode,
             index_rebuilt=index_rebuilt,
             index_docs=index_docs,
-            corrective_triggered=corrective_triggered,
-            corrective_reasons=corrective_reasons,
             scope_expanded=applied_expand_scope,
-            stage4_executed=stage4_executed,
         )
 
     if use_semantic_cache and cache_scope_key and cache_query:
@@ -3410,19 +4413,46 @@ def manual_find(
             payload={"trace_payload": trace_payload, "source_latency_ms": source_latency_ms},
         )
 
-    out: dict[str, Any] = {
-        "trace_id": trace_id,
-        "summary": summary,
-        "next_actions": next_actions,
-        "applied": {
-            "manual_id": applied_manual_id,
-            "requested_expand_scope": requested_expand_scope,
-            "expand_scope": applied_expand_scope,
-            "required_terms": applied_required_terms,
-        },
+    applied_out = {
+        "manual_id": applied_manual_id,
+        "requested_expand_scope": requested_expand_scope,
+        "expand_scope": applied_expand_scope,
+        "required_terms_source": required_terms_source,
+        "required_terms_decision_reason": required_terms_decision_reason,
+        "requested_required_terms": requested_required_terms,
+        "required_terms": applied_required_terms,
+        "required_terms_df_filtered": required_terms_df_filtered,
+        "required_terms_relaxed": applied_required_terms_relaxed,
+        "required_terms_relax_reason": required_terms_relax_reason,
+        "required_effect_status": required_effect_status,
+        "required_failure_reason": required_failure_reason,
+        "required_strict_candidates": required_strict_candidates,
+        "required_filtered_candidates": required_filtered_candidates,
+        "required_terms_match_stats": required_terms_match_stats,
+        "required_terms_missing": required_terms_missing,
+        "required_top_k": required_top_k,
+        "required_top_hits": required_top_hits,
+        "selected_gate": selected_gate,
+        "gate_selection_reason": gate_selection_reason,
     }
-    if applied_include_claim_graph:
-        out["claim_graph"] = claim_graph
+    if applied_compact:
+        out = _compact_manual_find_output(
+            trace_id=trace_id,
+            summary=summary,
+            applied=applied_out,
+            next_actions=next_actions,
+        )
+    else:
+        out = {
+            "trace_id": trace_id,
+            "summary": summary,
+            "next_actions": next_actions,
+            "selected_gate": selected_gate,
+            "gate_selection_reason": gate_selection_reason,
+            "applied": applied_out,
+        }
+        if applied_include_claim_graph:
+            out["claim_graph"] = claim_graph
     return out
 
 
@@ -3432,6 +4462,7 @@ def manual_hits(
     kind: str | None = None,
     offset: int | None = None,
     limit: int | None = None,
+    compact: bool | None = None,
 ) -> dict[str, Any]:
     applied_trace_id = _require_non_empty_string(trace_id, name="trace_id")
     payload = state.traces.get(applied_trace_id)
@@ -3444,12 +4475,24 @@ def manual_hits(
             raise ToolError("invalid_parameter", "kind must be string")
         applied_kind = kind
     ensure(
-        applied_kind in {"candidates", "unscanned", "conflicts", "gaps", "integrated_top", "claims", "evidences", "edges"},
+        applied_kind in {
+            "candidates",
+            "unscanned",
+            "conflicts",
+            "gaps",
+            "integrated_top",
+            "claims",
+            "evidences",
+            "edges",
+            "gate_runs",
+            "fusion_debug",
+        },
         "invalid_parameter",
         "invalid kind",
     )
     applied_offset = _parse_int_param(offset, name="offset", default=0, min_value=0)
     applied_limit = _parse_int_param(limit, name="limit", default=50, min_value=1)
+    applied_compact = _parse_bool_param(compact, name="compact", default=False)
 
     key_map = {
         "candidates": "candidates",
@@ -3460,6 +4503,8 @@ def manual_hits(
         "claims": "claim_graph.claims",
         "evidences": "claim_graph.evidences",
         "edges": "claim_graph.edges",
+        "gate_runs": "gate_runs",
+        "fusion_debug": "fusion_debug",
     }
     mapped_key = key_map[applied_kind]
     if "." in mapped_key:
@@ -3468,14 +4513,42 @@ def manual_hits(
     else:
         rows = payload.get(mapped_key, [])
     shared_manual_id: str | None = None
-    if applied_kind == "candidates":
+    if applied_kind in {"candidates", "integrated_top"}:
         manual_ids = {
             str(((item.get("ref") or {}).get("manual_id")))
             for item in rows
             if (item.get("ref") or {}).get("manual_id")
         }
         shared_manual_id = next(iter(manual_ids)) if len(manual_ids) == 1 else None
+    if applied_compact and applied_kind in {"candidates", "integrated_top"}:
         compact_rows: list[dict[str, Any]] = []
+        for item in rows:
+            ref = dict(item.get("ref") or {})
+            compact_ref: dict[str, Any] = {}
+            if applied_kind == "integrated_top":
+                if ref.get("manual_id"):
+                    compact_ref["manual_id"] = ref["manual_id"]
+            elif not shared_manual_id and ref.get("manual_id"):
+                compact_ref["manual_id"] = ref["manual_id"]
+            if ref.get("path"):
+                compact_ref["path"] = ref["path"]
+            if ref.get("start_line") is not None:
+                compact_ref["start_line"] = ref["start_line"]
+            compact_item: dict[str, Any] = {"ref": compact_ref}
+            if applied_kind == "integrated_top":
+                title = ref.get("title")
+                if isinstance(title, str) and title:
+                    compact_item["title"] = title
+            score = item.get("score")
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                compact_item["score"] = round(float(score), 4)
+            matched_tokens = item.get("matched_tokens")
+            if isinstance(matched_tokens, list) and matched_tokens:
+                compact_item["matched_tokens"] = matched_tokens
+            compact_rows.append(compact_item)
+        rows = compact_rows
+    elif applied_kind == "candidates":
+        compact_rows = []
         for item in rows:
             ref = dict(item.get("ref") or {})
             compact_ref: dict[str, Any] = {}

@@ -45,11 +45,6 @@ class Config:
     adaptive_file_bias_base: float
     coverage_min_ratio: float
     marginal_gain_min: float
-    corrective_enabled: bool
-    corrective_coverage_min: float
-    corrective_margin_min: float
-    corrective_min_candidates: int
-    corrective_on_conflict: bool
     sparse_query_coverage_weight: float
     lexical_coverage_weight: float
     lexical_phrase_weight: float
@@ -61,10 +56,6 @@ class Config:
     manual_find_exploration_ratio: float
     manual_find_exploration_min_candidates: int
     manual_find_exploration_score_scale: float
-    manual_find_stage4_enabled: bool
-    manual_find_stage4_neighbor_limit: int
-    manual_find_stage4_budget_time_ms: int
-    manual_find_stage4_score_penalty: float
     manual_find_query_decomp_enabled: bool
     manual_find_query_decomp_max_sub_queries: int
     manual_find_query_decomp_rrf_k: int
@@ -72,9 +63,6 @@ class Config:
     manual_find_scan_hard_cap: int
     manual_find_per_file_candidate_cap: int
     manual_find_file_prescan_enabled: bool
-    late_rerank_enabled: bool
-    late_rerank_top_n: int
-    late_rerank_weight: float
     trace_max_keep: int
     trace_ttl_sec: int
     allow_file_scope: bool
@@ -106,11 +94,6 @@ class Config:
             adaptive_file_bias_base=_env_float("ADAPTIVE_FILE_BIAS_BASE", 0.80),
             coverage_min_ratio=_env_float("COVERAGE_MIN_RATIO", 0.90),
             marginal_gain_min=_env_float("MARGINAL_GAIN_MIN", 0.02),
-            corrective_enabled=_env_bool("CORRECTIVE_ENABLED", False),
-            corrective_coverage_min=_env_float("CORRECTIVE_COVERAGE_MIN", 0.90),
-            corrective_margin_min=_env_float("CORRECTIVE_MARGIN_MIN", 0.15),
-            corrective_min_candidates=_env_int("CORRECTIVE_MIN_CANDIDATES", 3),
-            corrective_on_conflict=_env_bool("CORRECTIVE_ON_CONFLICT", True),
             sparse_query_coverage_weight=_env_float("SPARSE_QUERY_COVERAGE_WEIGHT", 0.35),
             lexical_coverage_weight=_env_float("LEXICAL_COVERAGE_WEIGHT", 0.50),
             lexical_phrase_weight=_env_float("LEXICAL_PHRASE_WEIGHT", 0.50),
@@ -122,10 +105,6 @@ class Config:
             manual_find_exploration_ratio=_env_float("MANUAL_FIND_EXPLORATION_RATIO", 0.20),
             manual_find_exploration_min_candidates=_env_int("MANUAL_FIND_EXPLORATION_MIN_CANDIDATES", 2),
             manual_find_exploration_score_scale=_env_float("MANUAL_FIND_EXPLORATION_SCORE_SCALE", 0.35),
-            manual_find_stage4_enabled=_env_bool("MANUAL_FIND_STAGE4_ENABLED", True),
-            manual_find_stage4_neighbor_limit=_env_int("MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT", 2),
-            manual_find_stage4_budget_time_ms=_env_int("MANUAL_FIND_STAGE4_BUDGET_TIME_MS", 15000),
-            manual_find_stage4_score_penalty=_env_float("MANUAL_FIND_STAGE4_SCORE_PENALTY", 0.15),
             manual_find_query_decomp_enabled=_env_bool("MANUAL_FIND_QUERY_DECOMP_ENABLED", True),
             manual_find_query_decomp_max_sub_queries=_env_int("MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES", 3),
             manual_find_query_decomp_rrf_k=_env_int("MANUAL_FIND_QUERY_DECOMP_RRF_K", 60),
@@ -133,13 +112,10 @@ class Config:
             manual_find_scan_hard_cap=_env_int("MANUAL_FIND_SCAN_HARD_CAP", 5000),
             manual_find_per_file_candidate_cap=_env_int("MANUAL_FIND_PER_FILE_CANDIDATE_CAP", 8),
             manual_find_file_prescan_enabled=_env_bool("MANUAL_FIND_FILE_PRESCAN_ENABLED", True),
-            late_rerank_enabled=_env_bool("LATE_RERANK_ENABLED", False),
-            late_rerank_top_n=_env_int("LATE_RERANK_TOP_N", 50),
-            late_rerank_weight=_env_float("LATE_RERANK_WEIGHT", 0.60),
             trace_max_keep=_env_int("TRACE_MAX_KEEP", 100),
             trace_ttl_sec=_env_int("TRACE_TTL_SEC", 1800),
             allow_file_scope=_env_bool("ALLOW_FILE_SCOPE", False),
-            sem_cache_enabled=_env_bool("SEM_CACHE_ENABLED", False),
+            sem_cache_enabled=_env_bool("SEM_CACHE_ENABLED", True),
             sem_cache_ttl_sec=_env_int("SEM_CACHE_TTL_SEC", 1800),
             sem_cache_max_keep=_env_int("SEM_CACHE_MAX_KEEP", 500),
             sem_cache_sim_threshold=_env_float("SEM_CACHE_SIM_THRESHOLD", 0.92),

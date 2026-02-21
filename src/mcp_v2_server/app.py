@@ -141,8 +141,8 @@ def create_app(state: AppState | None = None) -> FastMCP:
     def manual_find(
         query: str,
         manual_id: str,
+        required_terms: list[str],
         expand_scope: bool | None = None,
-        required_terms: list[str] | None = None,
         only_unscanned_from_trace_id: str | None = None,
         budget: dict[str, Any] | None = None,
         include_claim_graph: bool | None = None,
@@ -161,6 +161,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 budget=budget,
                 include_claim_graph=include_claim_graph,
                 use_cache=use_cache,
+                compact=True,
             ),
         )
 
@@ -197,11 +198,23 @@ def create_app(state: AppState | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def manual_hits(trace_id: str, kind: str | None = None, offset: int | None = None, limit: int | None = None) -> dict[str, Any]:
+    def manual_hits(
+        trace_id: str,
+        kind: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
         return _execute(
             app_state,
             "manual_hits",
-            lambda: manual_hits_impl(app_state, trace_id=trace_id, kind=kind, offset=offset, limit=limit),
+            lambda: manual_hits_impl(
+                app_state,
+                trace_id=trace_id,
+                kind=kind,
+                offset=offset,
+                limit=limit,
+                compact=True,
+            ),
         )
 
     @mcp.tool()

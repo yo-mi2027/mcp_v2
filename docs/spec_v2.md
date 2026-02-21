@@ -1,6 +1,6 @@
 # 統合MCPサーバ v2 共通仕様（現行）
 
-最終更新: 2026-02-19
+最終更新: 2026-02-21
 
 ## 1. スコープ
 
@@ -34,11 +34,6 @@
 - `ADAPTIVE_FILE_BIAS_BASE`（既定: `0.80`）
 - `COVERAGE_MIN_RATIO`（既定: `0.90`）
 - `MARGINAL_GAIN_MIN`（既定: `0.02`）
-- `CORRECTIVE_ENABLED`（既定: `false`）
-- `CORRECTIVE_COVERAGE_MIN`（既定: `0.90`）
-- `CORRECTIVE_MARGIN_MIN`（既定: `0.15`）
-- `CORRECTIVE_MIN_CANDIDATES`（既定: `3`）
-- `CORRECTIVE_ON_CONFLICT`（既定: `true`）
 - `SPARSE_QUERY_COVERAGE_WEIGHT`（既定: `0.35`）
 - `LEXICAL_COVERAGE_WEIGHT`（既定: `0.50`）
 - `LEXICAL_PHRASE_WEIGHT`（既定: `0.50`）
@@ -50,10 +45,6 @@
 - `MANUAL_FIND_EXPLORATION_RATIO`（既定: `0.20`）
 - `MANUAL_FIND_EXPLORATION_MIN_CANDIDATES`（既定: `2`）
 - `MANUAL_FIND_EXPLORATION_SCORE_SCALE`（既定: `0.35`）
-- `MANUAL_FIND_STAGE4_ENABLED`（既定: `true`）
-- `MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT`（既定: `2`）
-- `MANUAL_FIND_STAGE4_BUDGET_TIME_MS`（既定: `15000`）
-- `MANUAL_FIND_STAGE4_SCORE_PENALTY`（既定: `0.15`）
 - `MANUAL_FIND_QUERY_DECOMP_ENABLED`（既定: `true`）
 - `MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES`（既定: `3`）
 - `MANUAL_FIND_QUERY_DECOMP_RRF_K`（既定: `60`）
@@ -61,13 +52,10 @@
 - `MANUAL_FIND_SCAN_HARD_CAP`（既定: `5000`）
 - `MANUAL_FIND_PER_FILE_CANDIDATE_CAP`（既定: `8`）
 - `MANUAL_FIND_FILE_PRESCAN_ENABLED`（既定: `true`）
-- `LATE_RERANK_ENABLED`（既定: `false`）
-- `LATE_RERANK_TOP_N`（既定: `50`）
-- `LATE_RERANK_WEIGHT`（既定: `0.60`）
 - `TRACE_MAX_KEEP`（既定: `100`）
 - `TRACE_TTL_SEC`（既定: `1800`）
 - `ALLOW_FILE_SCOPE`（既定: `false`）
-- `SEM_CACHE_ENABLED`（既定: `false`）
+- `SEM_CACHE_ENABLED`（既定: `true`）
 - `SEM_CACHE_TTL_SEC`（既定: `1800`）
 - `SEM_CACHE_MAX_KEEP`（既定: `500`）
 - `SEM_CACHE_SIM_THRESHOLD`（既定: `0.92`）
@@ -128,6 +116,9 @@ Actionオブジェクト:
 
 - `type` は次に呼ぶ現行ツール名
 - `params` は最小パラメータのみ返す
+- manuals系では `manual_hits|manual_read|manual_find|manual_scan` を取りうる
+- 公開MCPツール（`app.py`）では `manual_find` / `manual_hits` は常時compact返却（選択不可）
+- 公開MCPツール（`app.py`）の `manual_find` は軽量化のため `next_actions[]` から `confidence` を省略し、`type` と `params` のみ返す
 
 ## 8. 非公開/廃止
 

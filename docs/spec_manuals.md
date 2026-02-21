@@ -1,12 +1,12 @@
 # 統合MCPサーバ v2 Manual仕様（現行）
 
-最終更新: 2026-02-19
+最終更新: 2026-02-20
 
 ## 1. Tool Catalog
 
 - `manual_ls({ id? })`
 - `manual_toc({ manual_id, path_prefix?, max_files?, cursor?, depth?, max_headings_per_file? })`
-- `manual_find({ query, manual_id, expand_scope?, required_terms?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache? })`
+- `manual_find({ query, manual_id, required_terms, expand_scope?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
 - `manual_read({ ref, scope?, allow_file?, expand? })`
 - `manual_scan({ manual_id, path, start_line?, cursor? })`
@@ -42,7 +42,7 @@ Output:
 
 - `id` 未指定時は `manuals` を適用する。
 - `id=manuals` は `MANUALS_ROOT` 直下の manual ディレクトリのみ返す（1階層）。
-- `manual_ls(id="manuals")` の直後に再度 `manuals` を呼ぶことは不可。先に返却 `items[].id` のいずれかを選択して辿る。
+- `manual_ls(id="manuals")` は繰り返し呼び出し可能。各呼び出しで最新の manual 一覧を返す。
 - `manual_toc` / `manual_find` / `manual_read` / `manual_scan` の前に、同一セッションで `manual_ls` の成功呼び出しが必須。
 - manual ディレクトリ `id` を指定すると、その直下の子要素のみ返す（再帰しない）。
 - ディレクトリ子は `kind=dir`、対象拡張子（`.md/.json`）のファイルは `kind=file` を返す。
@@ -115,7 +115,7 @@ Input:
   "query": "string",
   "manual_id": "string",
   "expand_scope": "boolean | null",
-  "required_terms": ["string"] | "null",
+  "required_terms": ["string"],
   "only_unscanned_from_trace_id": "string | null",
   "include_claim_graph": "boolean | null",
   "use_cache": "boolean | null",
@@ -135,7 +135,37 @@ Output:
     "manual_id": "string",
     "requested_expand_scope": "boolean | null",
     "expand_scope": "boolean",
-    "required_terms": ["string"]
+    "required_terms_source": "user",
+    "required_terms_decision_reason": "string | null",
+    "requested_required_terms": ["string"],
+    "required_terms": ["string"],
+    "required_terms_df_filtered": [
+      {
+        "term": "string",
+        "doc_freq": "number",
+        "doc_freq_ratio": "number",
+        "reason": "too_rare|too_common",
+        "dropped": "boolean"
+      }
+    ],
+    "required_terms_relaxed": "boolean",
+    "required_terms_relax_reason": "string | null",
+    "required_effect_status": "required_effective|term_dropped_or_weakened|required_none_matched|required_fallback",
+    "required_failure_reason": "string | null",
+    "required_strict_candidates": "number",
+    "required_filtered_candidates": "number",
+    "required_terms_match_stats": [
+      {
+        "term": "string",
+        "matched_docs": "number",
+        "matched_doc_ratio": "number"
+      }
+    ],
+    "required_terms_missing": ["string"],
+    "required_top_k": "number",
+    "required_top_hits": "number",
+    "selected_gate": "single|single_base|single_required|g0|g_req",
+    "gate_selection_reason": "string | null"
   },
   "claim_graph?": {
     "claims": [
@@ -156,7 +186,7 @@ Output:
           "path": "string",
           "start_line": "number"
         },
-        "signals": ["exact|phrase|anchor|number_context|proximity|exceptions|code_exact|prf|late_rerank|exploration|expanded_scope|query_decomp_rrf"],
+        "signals": ["exact|required_term|required_term_and|required_terms_rrf|gate_rrf|phrase|anchor|number_context|proximity|exceptions|code_exact|prf|exploration|query_decomp_rrf|definition_title"],
         "score": "number",
         "snippet_digest": "string"
       }
@@ -191,8 +221,25 @@ Output:
   },
   "next_actions": [
     {
-      "type": "manual_hits|manual_read|manual_find",
+      "type": "manual_hits|manual_read|manual_find|manual_scan",
       "confidence": "number | null",
+      "params": "object | null"
+    }
+  ]
+}
+```
+
+公開MCPツール（`app.py`）の返却形式:
+
+```json
+{
+  "trace_id": "string",
+  "candidates": "number",
+  "status": "required_effective|term_dropped_or_weakened|required_none_matched|required_fallback",
+  "failure_reason": "string | null",
+  "next_actions": [
+    {
+      "type": "manual_hits|manual_read|manual_find|manual_scan",
       "params": "object | null"
     }
   ]
@@ -205,21 +252,40 @@ Output:
 - 一次候補の検索スコアは lexical-only（`idf × tf`）を基礎とし、coverage/phrase/number-context/proximity の加点とノイズ減点で構成する。
 - lexical加減点の係数は環境変数（`LEXICAL_*`）で調整可能。
 - `MANUAL_FIND_EXPLORATION_*` により、候補集合に探索バケット（低prior候補）を固定比率で混在させる。
-- `LATE_RERANK_ENABLED=true` または `late_reranker` hook が設定されている場合、候補上位に late interaction rerank を適用する。
 - `include_claim_graph=true` のときのみ `claim_graph` を返す。
+- 公開MCPツール（`app.py`）では常時最小レスポンスを返すため、`include_claim_graph=true` でも `claim_graph` は返さない。
 - `summary.conflict_count` と `manual_hits(kind="conflicts").total` は一致する。
 - `summary.gap_count` と `manual_hits(kind="gaps").total` は一致する。
 - `manual_id` は必須（未指定/空文字は `invalid_parameter`）。
 - `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
-- `required_terms` は省略可。指定時は文字列配列のみ許可し、最大2語まで（空文字不可）。
+- 検索スコープは常に指定 `manual_id` 配下に限定する（manual間の自動拡張は行わない）。
+- `required_terms` は必須。文字列配列のみ許可し、`1..2` 語（空文字不可）。
+- `manual_find` は `g0(requiredなし)` と `g_req(requiredあり)` を常時実行し、RRF統合で最終候補を決定する。
+- `g_req` が0件の場合は `g0` を採用し、`applied.required_terms_relaxed=true` を返す。
+- `applied.required_terms_source` は `user` を返す。
+- `applied.required_terms_decision_reason` は `provided_by_caller` を返す。
+- `applied.requested_required_terms` は入力値（正規化後）を返す。
+- `applied.required_terms` は実際に検索へ適用した語を返す。
+- `applied.selected_gate` は最終採用ゲート（`g0|g_req` 等）を返す。
+- `applied.gate_selection_reason` はゲート採用理由を返す。
+- `required_terms` は検索前にDFガードを適用し、診断情報を `applied.required_terms_df_filtered` に記録する。
+- `applied.required_terms_df_filtered[].dropped=true` は検索語から除外されたことを示す（現行は `too_common` が対象）。
+- `applied.required_terms_df_filtered[].dropped=false` は検索語として保持されたことを示す（現行は `too_rare` が対象）。
+- `applied.required_effect_status` は strict/filtered required 候補数と最終上位（top-k）への残存状況を加味した診断結果を返す。
+- `applied.required_strict_candidates` と `applied.required_filtered_candidates` は診断に使った各候補数を返す。
+- `applied.required_terms_match_stats` は要求語ごとの manual 内 doc hit 数を返す。
+- `applied.required_terms_missing` は manual 内で未検出だった要求語を返す。
+- `applied.required_top_k` と `applied.required_top_hits` は最終候補上位における required signal 残存数を返す。
+- 網羅要求（例: 「網羅的」「全て参照してから」）では `next_actions` が `manual_scan` を優先しうる。
 - `required_terms` を2語指定した場合は `A` / `B` / `A+B` の3passで評価し、RRF統合で再ランキングする。
-- `expand_scope=true` かつ stage4必要判定時は、`MANUAL_FIND_STAGE4_*` 制約の範囲で隣接manualに限定拡張する。
+- `g_req` が0件の場合、`applied.required_terms_relaxed=true` と `applied.required_terms_relax_reason=zero_candidates_with_required_terms` を返す。
 - レスポンスの `applied.requested_expand_scope` はリクエスト入力値（未指定なら `null`）を返す。
-- レスポンスの `applied.expand_scope` は実適用値を返す（stage4実行時のみ `true`）。
+- レスポンスの `applied.expand_scope` は実適用値を返す（現行実装では常に `false`）。
 - Query decomposition + RRF 有効時は、sub-query 失敗を許容して継続し、全sub-query失敗または結合候補0件時のみ通常検索にフォールバックする。
-- `CORRECTIVE_ENABLED=true` かつ `expand_scope=true` の場合は、条件を満たせば限定stage4昇格を実行する。
 - `expand_scope` と `include_claim_graph` と `use_cache` は boolean のみ許可（非booleanは `invalid_parameter`）。
 - `use_cache` 未指定時は `SEM_CACHE_ENABLED` 設定値を適用する。
+- 公開MCPツール（`app.py`）の `manual_find` 出力は最小形式（`trace_id`, `candidates`, `status`, `failure_reason`, `next_actions`）を返す。
+- 公開MCPツール（`app.py`）の `next_actions[]` は `type` と `params` のみを返し、`confidence` は省略する。
 - cache hit でも `summary.gap_count/conflict_count` が閾値（`SEM_CACHE_MAX_SUMMARY_GAP/SEM_CACHE_MAX_SUMMARY_CONFLICT`）を超える場合は再探索する。
 - `budget.time_ms` 既定値は `60000`、`budget.max_candidates` 既定値は `200`。
 - `budget.time_ms` と `budget.max_candidates` は整数かつ `>= 1`。
@@ -235,7 +301,7 @@ Input:
 ```json
 {
   "trace_id": "string",
-  "kind": "candidates|unscanned|conflicts|gaps|integrated_top|claims|evidences|edges|null",
+  "kind": "candidates|unscanned|conflicts|gaps|integrated_top|claims|evidences|edges|gate_runs|fusion_debug|null",
   "offset": "number | null",
   "limit": "number | null"
 }
@@ -262,6 +328,7 @@ Output:
 - `offset` / `limit` は `true/false` を許可しない（`invalid_parameter`）。
 - `kind=candidates` の `items[]` は圧縮形式を返す（`target/json_path/title` は返さない）。
 - `kind=candidates` で全件の `manual_id` が同一なら、`manual_id` はレスポンス上位に1回だけ返し、`items[].ref.manual_id` は省略する。
+- 公開MCPツール（`app.py`）の `kind in {"candidates","integrated_top"}` は常に最小形式（`ref`, `score`, `matched_tokens` と、`integrated_top` のみ `title`）を返す。
 
 ## 6. `manual_read`
 

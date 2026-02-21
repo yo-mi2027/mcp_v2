@@ -141,7 +141,8 @@ MCPクライアントから次を順に呼び出してください。
 1. `manual_ls({ id: "manuals" })` で manual 一覧を取得
 2. 返ってきた `dir` の `id` を `manual_ls` に渡して、1階層ずつ辿る
 3. `manual_toc` は既定 `depth=shallow` で構造把握し、必要時のみ `depth=deep` と `path_prefix` で見出し取得
-4. `manual_find` の結果 `trace_id` を `manual_hits` に渡す
+4. `manual_find`（`required_terms` は必須: 1〜2語）の結果 `trace_id` を `manual_hits` に渡す
+   - 公開MCPツールでは `manual_find` / `manual_hits` は常時軽量レスポンス（compact固定）
 5. vault は必要に応じて `vault_ls({ path: null })` で探索してから、`vault_read` / `vault_scan` / `vault_create` / `vault_replace` を呼ぶ
 
 これで「一覧 -> 検索 -> 詳細取得」の一連動作を確認できます。
@@ -228,17 +229,12 @@ uv run pytest -q
 ## 11. Eval駆動RAG（manual_find）実行
 
 評価データセット（30問）は `evals/manual_find_gold.jsonl` にあります。  
-次のコマンドで評価レポートを生成できます。
+次のコマンドで評価を実行できます（結果は標準出力のみで、ファイル保存しません）。
 
 ```bash
 source .venv/bin/activate
 python scripts/eval_manual_find.py
 ```
-
-出力先:
-
-- `vault/.system/evals/YYYY-MM-DDTHHMMSSZ.json`
-- `vault/.system/evals/latest.json`
 
 閾値をCIで強制したい場合:
 
@@ -258,17 +254,6 @@ python scripts/eval_manual_find.py --compare-sem-cache
 - `SEM_CACHE_ENABLED=true`（with_sem_cache）
 
 出力レポートには `baseline` / `with_sem_cache` / `metrics_delta` が含まれます。
-
-Late rerank の有無を比較する場合:
-
-```bash
-python scripts/eval_manual_find.py --compare-late-rerank
-```
-
-比較モードでは次を同一条件で2回実行します。
-
-- `LATE_RERANK_ENABLED=false`（baseline）
-- `LATE_RERANK_ENABLED=true`（with_late_rerank）
 
 Query decomposition + RRF の有無を比較する場合:
 
@@ -310,11 +295,6 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `ADAPTIVE_FILE_BIAS_BASE` (default: `0.80`)
 - `COVERAGE_MIN_RATIO` (default: `0.90`)
 - `MARGINAL_GAIN_MIN` (default: `0.02`)
-- `CORRECTIVE_ENABLED` (default: `false`)
-- `CORRECTIVE_COVERAGE_MIN` (default: `0.90`)
-- `CORRECTIVE_MARGIN_MIN` (default: `0.15`)
-- `CORRECTIVE_MIN_CANDIDATES` (default: `3`)
-- `CORRECTIVE_ON_CONFLICT` (default: `true`)
 - `SPARSE_QUERY_COVERAGE_WEIGHT` (default: `0.35`)
 - `LEXICAL_COVERAGE_WEIGHT` (default: `0.50`)
 - `LEXICAL_PHRASE_WEIGHT` (default: `0.50`)
@@ -326,10 +306,6 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `MANUAL_FIND_EXPLORATION_RATIO` (default: `0.20`)
 - `MANUAL_FIND_EXPLORATION_MIN_CANDIDATES` (default: `2`)
 - `MANUAL_FIND_EXPLORATION_SCORE_SCALE` (default: `0.35`)
-- `MANUAL_FIND_STAGE4_ENABLED` (default: `true`)
-- `MANUAL_FIND_STAGE4_NEIGHBOR_LIMIT` (default: `2`)
-- `MANUAL_FIND_STAGE4_BUDGET_TIME_MS` (default: `15000`)
-- `MANUAL_FIND_STAGE4_SCORE_PENALTY` (default: `0.15`)
 - `MANUAL_FIND_QUERY_DECOMP_ENABLED` (default: `true`)
 - `MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES` (default: `3`)
 - `MANUAL_FIND_QUERY_DECOMP_RRF_K` (default: `60`)
@@ -337,13 +313,10 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `MANUAL_FIND_SCAN_HARD_CAP` (default: `5000`)
 - `MANUAL_FIND_PER_FILE_CANDIDATE_CAP` (default: `8`)
 - `MANUAL_FIND_FILE_PRESCAN_ENABLED` (default: `true`)
-- `LATE_RERANK_ENABLED` (default: `false`)
-- `LATE_RERANK_TOP_N` (default: `50`)
-- `LATE_RERANK_WEIGHT` (default: `0.60`)
 - `TRACE_MAX_KEEP` (default: `100`)
 - `TRACE_TTL_SEC` (default: `1800`)
 - `ALLOW_FILE_SCOPE` (default: `false`)
-- `SEM_CACHE_ENABLED` (default: `false`)
+- `SEM_CACHE_ENABLED` (default: `true`)
 - `SEM_CACHE_TTL_SEC` (default: `1800`)
 - `SEM_CACHE_MAX_KEEP` (default: `500`)
 - `SEM_CACHE_SIM_THRESHOLD` (default: `0.92`)
@@ -353,3 +326,4 @@ python scripts/eval_manual_find.py --compare-query-decomp
 
 `SEM_CACHE_EMBEDDING_PROVIDER` は現時点では `none` のみサポートします。
 `manual_find` の `use_cache` パラメータで、リクエスト単位の cache バイパスができます。
+semantic cache はプロセス内メモリ保持です。サーバ再起動でキャッシュはクリアされます。
