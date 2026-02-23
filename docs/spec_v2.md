@@ -70,8 +70,9 @@
 注:
 
 - 現行実装の `SEM_CACHE_EMBEDDING_PROVIDER` は `none` のみサポート。
-- そのため既定運用では semantic cache の類似検索は実質無効で、cache hit は exact match 中心となる。
-- `SEM_CACHE_SIM_THRESHOLD` は非 `none` provider 実装時に有効化される想定の設定値。
+- 現行運用プロファイル（現在使用しているPCを含む標準環境）では `SEM_CACHE_EMBEDDING_PROVIDER=none` を固定運用とし、embedding provider は要件外。
+- そのため既定運用では semantic cache の類似検索は実質無効で、cache hit は正規化後 exact match 中心となる。
+- `SEM_CACHE_SIM_THRESHOLD` は互換性維持・将来拡張余地のために残している設定値であり、現行運用での導入予定を意味しない。
 
 ## 4. 共通安全要件
 
@@ -129,7 +130,7 @@ Actionオブジェクト:
 - manuals系では `manual_hits|manual_read|manual_find|manual_scan` を取りうる
 - 公開MCPツール（`app.py`）では `manual_find` / `manual_hits` は常時compact返却（選択不可）
 - 公開MCPツール（`app.py`）の compact `manual_find` は `next_actions` を返却契約上は保持するが、常に空配列（`[]`）を返す
-- 公開MCPツール（`app.py`）の compact `manual_find` は必要に応じて `inline_hits`（`manual_hits(kind="integrated_top", offset=0, compact=true)` と同形、`limit<=5`）を同梱できる
+- 公開MCPツール（`app.py`）の compact `manual_find` は既定で `inline_hits`（`manual_hits(kind="integrated_top", offset=0, compact=true)` と同形、既定 `limit=5`、`limit<=5`）を同梱する
 
 ## 8. 非公開/廃止
 

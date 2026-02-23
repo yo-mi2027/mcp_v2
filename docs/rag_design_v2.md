@@ -71,7 +71,7 @@
 - `manual_find` は `trace_id` 中心の返却を基本とし、詳細候補は `manual_hits` で段階取得する。
 - 非compact 経路では `summary` / `next_actions` を返す。
 - `include_claim_graph=true` の場合のみ `claim_graph` を返す（未指定時は trace payload 上も空）
-- 公開MCPの compact `manual_find` では `next_actions` は常に `[]`。必要時は `inline_hits`（`integrated_top` の先頭ページ、最大5件）を同梱できる
+- 公開MCPの compact `manual_find` では `next_actions` は常に `[]`。既定で `inline_hits`（`integrated_top` の先頭ページ、最大5件）を同梱する
 
 ## 4. 代表的な追跡パターン
 
@@ -82,7 +82,7 @@
 
 2. 候補本文の最小取得
 - `manual_read`（section-only）
-- 必要なら `manual_scan` で続き取得
+- 必要なら `manual_scan` で続き取得（`manual_read.applied.mode=scan_fallback` 時は返却 `next_cursor` をそのまま利用可能）
 
 3. 不足時の再探索
 - `manual_find(only_unscanned_from_trace_id=...)`
@@ -105,6 +105,8 @@
 
 - 実装済みの `SEM_CACHE_EMBEDDING_PROVIDER` は `none` のみのため、`sem_cache_mode=semantic` は通常発生しない。
 - 当面の運用評価では `exact` hit 率と `latency_saved_ms` を主指標として扱う。
+- 現行運用プロファイル（現在使用しているPCを含む標準環境）では embedding provider は導入しない（要件外）。
+- `SEM_CACHE_SIM_THRESHOLD` や `sem_cache_mode=semantic` は実装互換性・観測項目の整合のために残しており、現行の改善対象は正規化後 exact cache のみとする。
 
 ## 7. 非対象（本書）
 
@@ -118,14 +120,5 @@
 
 ## 9. 設計判断メモ（2026-02-23）
 
-採用:
-
-- `summary` を `claim_graph` 非依存にして、検索器の主経路を軽量化した。
-- `claim_graph` は on-demand 診断に限定し、A/B比較や詳細調査時にのみ使う。
-
-棄却:
-
-- `claim_graph` を `manual_find` の標準判定（`summary/gap_count/conflict_count`）に使い続ける案:
-  - retrieval指標の改善が確認できず、`needs_followup` だけ増えやすかったため。
-- `compare/unknown` へ facet を追加拡張して運用継続する案:
-  - facet辞書のドメイン依存が強く、汎用MCPという設計方針と衝突しやすいため。
+- 設計判断の正本は `requirements.md` の「## 12. 設計判断（2026-02-23）」を参照。
+- 本書では重複記載を避けるため、判断理由の詳細（採用/棄却案）は再掲しない。

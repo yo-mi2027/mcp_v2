@@ -34,6 +34,7 @@ MANUAL_TOOLS_REQUIRE_LS = {
     "manual_read",
     "manual_scan",
 }
+PUBLIC_MANUAL_FIND_INLINE_HITS_DEFAULT = {"limit": 5}
 
 def _enforce_discovery_order(state: AppState, tool: str) -> None:
     if tool in MANUAL_TOOLS_REQUIRE_LS and not state.manual_ls_seen:
@@ -76,10 +77,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
     def manual_toc(
         manual_id: str,
         path_prefix: str | None = None,
-        max_files: int | None = None,
-        cursor: dict[str, Any] | int | str | None = None,
-        depth: str | None = None,
-        max_headings_per_file: int | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -88,10 +85,6 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 app_state,
                 manual_id=manual_id,
                 path_prefix=path_prefix,
-                max_files=max_files,
-                cursor=cursor,
-                depth=depth,
-                max_headings_per_file=max_headings_per_file,
             ),
         )
 
@@ -107,6 +100,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
         use_cache: bool | None = None,
         inline_hits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        applied_inline_hits = inline_hits if inline_hits is not None else dict(PUBLIC_MANUAL_FIND_INLINE_HITS_DEFAULT)
         return _execute(
             app_state,
             "manual_find",
@@ -120,7 +114,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 budget=budget,
                 include_claim_graph=include_claim_graph,
                 use_cache=use_cache,
-                inline_hits=inline_hits,
+                inline_hits=applied_inline_hits,
                 compact=True,
             ),
         )

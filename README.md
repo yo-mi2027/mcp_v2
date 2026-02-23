@@ -140,7 +140,7 @@ MCPクライアントから次を順に呼び出してください。
 
 1. `manual_ls({ id: "manuals" })` で manual 一覧を取得
 2. 返ってきた `dir` の `id` を `manual_ls` に渡して、1階層ずつ辿る
-3. `manual_toc` は既定 `depth=shallow` で構造把握し、必要時のみ `depth=deep` と `path_prefix` で見出し取得
+3. `manual_toc` は必要に応じて `path_prefix` で対象ファイル一覧を絞り込みながら構造把握する
 4. `manual_find`（`required_terms` は必須: 1〜2語）の結果 `trace_id` を `manual_hits` に渡す
    - 公開MCPツールでは `manual_find` / `manual_hits` は常時軽量レスポンス（compact固定）
 5. vault は必要に応じて `vault_ls({ path: null })` で探索してから、`vault_read` / `vault_scan` / `vault_create` / `vault_replace` を呼ぶ
@@ -192,7 +192,6 @@ pip install -r requirements.txt
 対処:
 
 - `path_prefix` を指定して対象ファイルを絞ってください。
-- `path_prefix` が空の場合は `max_files <= 50` を守ってください。
 
 ### 5) 数値パラメータに `true` / `false` を渡して `invalid_parameter` になる
 
@@ -324,6 +323,8 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `SEM_CACHE_MAX_SUMMARY_CONFLICT` (default: `-1`, `-1` は無効)
 
 `SEM_CACHE_EMBEDDING_PROVIDER` は現時点では `none` のみサポートします。
-このため現行の `--compare-sem-cache` は主に exact cache の効果測定になります（`semantic` hit は通常発生しません）。
+現行運用プロファイル（現在使用しているPCを含む標準環境）では `SEM_CACHE_EMBEDDING_PROVIDER=none` を固定運用とし、embedding provider は導入しません。
+このため現行の `--compare-sem-cache` は主に正規化後 exact cache の効果測定になります（`semantic` hit は通常発生しません）。
+`SEM_CACHE_SIM_THRESHOLD` は互換性維持のために残している設定値で、現行運用での導入予定を意味しません。
 `manual_find` の `use_cache` パラメータで、リクエスト単位の cache バイパスができます。
 semantic cache はプロセス内メモリ保持です。サーバ再起動でキャッシュはクリアされます。

@@ -14,7 +14,7 @@
 ## 1. Tool Catalog
 
 - `manual_ls({ id? })`
-- `manual_toc({ manual_id, path_prefix?, max_files?, cursor?, depth?, max_headings_per_file? })`
+- `manual_toc({ manual_id, path_prefix? })`
 - `manual_find({ query, manual_id, required_terms, expand_scope?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache?, inline_hits? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
 - `manual_read({ ref, max_chars? })`
@@ -64,13 +64,7 @@ Input:
 ```json
 {
   "manual_id": "string",
-  "path_prefix": "string | null",
-  "max_files": "number | null",
-  "cursor": {
-    "offset": "number"
-  } | "number | string (offset shorthand) | null",
-  "depth": "shallow | deep | null",
-  "max_headings_per_file": "number | null"
+  "path_prefix": "string | null"
 }
 ```
 
@@ -80,26 +74,12 @@ Output:
 {
   "applied": {
     "manual_id": "string",
-    "path_prefix": "string",
-    "depth": "shallow | deep",
-    "max_files": "number",
-    "include_headings": "boolean",
-    "max_headings_per_file": "number",
-    "offset": "number"
+    "path_prefix": "string"
   },
   "total_files": "number",
-  "next_cursor": {
-    "offset": "number"
-  },
   "items": [
     {
-      "path": "string",
-      "headings": [
-        {
-          "title": "string",
-          "line_start": "number"
-        }
-      ]
+      "path": "string"
     }
   ]
 }
@@ -107,11 +87,6 @@ Output:
 
 固定ルール:
 
-- `depth` 既定値は `shallow`。`deep` は見出しを返す。
-- `depth=deep` の場合、`path_prefix` は必須。
-- `path_prefix` を空にする場合、`max_files <= 50` を必須とする。
-- `depth=deep` の場合、`max_files <= 50` を必須とする。
-- `include_headings` は廃止。指定された場合は受理しない。
 - `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
 - 対象ファイル数がハード上限（200件）を超える場合は `needs_narrow_scope` を返す。
 
@@ -312,10 +287,11 @@ Output:
 - `use_cache` 未指定時は `SEM_CACHE_ENABLED` 設定値を適用する。
 - `include_claim_graph=true` の場合は semantic cache をバイパスする（payload形状/意味の混在を避けるため）。
 - 公開MCPツール（`app.py`）の `manual_find` 出力は最小形式（`trace_id`, `candidates`, `status`, `failure_reason`, `next_actions`）を返す。
-- `inline_hits` を指定した場合、公開MCPツール（`app.py`）の `manual_find` は `manual_hits(kind="integrated_top", offset=0, compact=true)` と同形の `inline_hits` を同梱する。
+- 公開MCPツール（`app.py`）の `manual_find` は、`inline_hits` 未指定時でも既定で `manual_hits(kind="integrated_top", offset=0, compact=true)` と同形の `inline_hits`（`limit=5`）を同梱する。
 - `inline_hits.limit` は整数かつ `>= 1`。公開MCPツールでは最大 `5` 件に制限する（超過値は `5` に丸める）。
 - 公開MCPツール（`app.py`）の compact `next_actions` は常に空配列（`[]`）を返す（誘導は返さない）。
 - 公開MCPツール（`app.py`）の `next_actions[]` は `type` と `params` のみを返し、`confidence` は省略する。
+- 非compact `manual_find` は `selected_gate` / `gate_selection_reason` をトップレベルには返さず、`applied.*` のみを返す（重複回避）。
 - cache hit でも `summary.gap_count/conflict_count` が閾値（`SEM_CACHE_MAX_SUMMARY_GAP/SEM_CACHE_MAX_SUMMARY_CONFLICT`）を超える場合は再探索する。
 - 非compact `manual_find` は `applied.sem_cache_*` 診断（used/hit/mode/score/latency_saved_ms）を返す。
 - 公開MCPツール（`app.py`）の compact `manual_find` は `applied` を返さないため、`sem_cache_*` 診断は返さない。
@@ -392,6 +368,7 @@ Input:
 - `max_chars` は整数のみ許可。未指定時は既定値 `12000`。範囲は `256..50000`。
 - `ref.start_line` は見出し開始行に一致する section 指定として扱う。未指定時は先頭section。
 - 同一セクション再要求を検知した場合は、同一ファイルの次行から `manual_scan` 相当の自動フォールバックを行う。
+- `applied.mode="scan_fallback"` の場合、継続取得用に `manual_scan` と同形の `applied_range` / `next_cursor` / `eof` を返す。`next_cursor` はそのまま `manual_scan(cursor=...)` に渡して続き取得できる。
 
 Output:
 
@@ -399,6 +376,14 @@ Output:
 {
   "text": "string",
   "truncated": "boolean",
+  "applied_range": {
+    "start_line": "number",
+    "end_line": "number"
+  } | "null (mode=read時は省略可)",
+  "next_cursor": {
+    "char_offset": "number | null"
+  } | "null (mode=read時は省略可)",
+  "eof": "boolean | null (mode=read時は省略可)",
   "applied": {
     "scope": "section",
     "max_sections": "null",
@@ -458,17 +443,5 @@ Output:
 
 ## 8. 設計判断メモ（2026-02-23）
 
-採用:
-
-- `summary` は retrieval-only 診断として扱い、`claim_graph` 非依存で算出する。
-- `claim_graph` は `include_claim_graph=true` の要求時のみ構築する（通常経路の負荷削減）。
-- `manual_read` は section-only に限定し、逐次読解は `manual_scan` に寄せる。
-
-棄却:
-
-- `claim_graph` 常時構築 + `summary` への常時反映案:
-  - retrieval 指標の改善が確認できず、`needs_followup` の過剰化とレイテンシ増を招きやすかったため。
-- `manual_read` で `snippet|sections|file` を維持する案:
-  - APIの複雑性に対して利用価値が低く、`manual_scan` と役割が重複していたため。
-- `claim_graph` の facet を増やして（例 `condition`, `amount`）継続利用する案:
-  - 辞書依存が強まり汎用性を損ないやすく、unknown低減の効果が未検証だったため。
+- 設計判断の正本は `requirements.md` の「## 12. 設計判断（2026-02-23）」を参照。
+- 本書では I/O 契約を優先し、判断理由の詳細（採用/棄却案）は重複記載しない。

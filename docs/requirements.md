@@ -58,7 +58,7 @@
 - 導線は `manual_find`（+ `manual_hits`）を基本とし、網羅要求の入力時のみ `manual_scan` 優先導線を許可する。
 - 結果は `trace_id` 中心で返し、候補詳細は `manual_hits`、本文は `manual_read` / `manual_scan` で段階取得する。
 - 公開MCPツール（`app.py`）の `manual_find` / `manual_hits` は常時 compact 経路を使い、返答トークンを抑制する。
-- compact `manual_find` は `next_actions=[]` を返し、必要時のみ `inline_hits`（`integrated_top` 先頭ページ）を同梱できる。
+- compact `manual_find` は `next_actions=[]` を返し、既定で `inline_hits`（`integrated_top` 先頭ページ）を同梱する。
 - `summary` は retrieval-only の軽量診断であり、`claim_graph` は任意の詳細診断（`include_claim_graph=true` 時のみ）として扱う。
 - `manual_find` は semantic cache（exact -> semantic）を利用可能とし、manual更新時は fingerprint ベースで自動無効化する。
 - `only_unscanned_from_trace_id` 指定時は cache をバイパスし、未探索優先フローを維持する。
@@ -149,6 +149,7 @@
   - `p95_latency_ms <= 1200`
   - `error_rate == 0`
 - 初期導入後2週間は閾値を固定し、その後の改定は週次レビューで行う。
+- 現行運用プロファイル（現在使用しているPCを含む標準環境）では embedding provider 導入は要件外とし、embedding 導入可否の受け入れ基準は本書では定義しない。
 
 ## 9. Eval初期運用プロファイル
 
@@ -166,7 +167,10 @@
 - Eval結果はファイル保存せず、CLI標準出力で確認する。
 - Semantic Cache比較時は `scripts/eval_manual_find.py --compare-sem-cache` を利用し、`baseline` と `with_sem_cache` の差分 (`metrics_delta`) を記録する。
 - `sem_cache_compare` の比較サマリには少なくとも `tokens_per_query_delta` と cache 効率指標（例: `sem_cache_hit_rate`, `sem_cache_exact_hit_rate`, 推定短縮時間差分）を含める。
-- 現行実装の embedding provider は `none` のみのため、当面の比較は exact cache 中心の評価として扱う（semantic hit は通常 0）。
+- 現行運用プロファイル（現在使用しているPCを含む標準環境）では `SEM_CACHE_EMBEDDING_PROVIDER=none` を固定運用とし、embedding provider は導入しない。
+- したがって当面の比較は正規化後 exact cache 中心の評価として扱う（`semantic` hit は通常 0）。
+- `SEM_CACHE_SIM_THRESHOLD` は互換性維持・将来拡張余地のために残している設定値であり、現行運用での導入ロードマップを意味しない。
+- cache 改善はまず `normalize_text()` / `_cacheable_query()` の安全な表記ゆれ吸収（正規化後 exact の強化）を対象とし、意味類似ベースの再利用は別プロファイル/別合意なしに採用しない。
 - Eval結果JSONには少なくとも次を含める:
   - `dataset_hash`
   - `metrics`
@@ -190,7 +194,8 @@
 - `manual_find.summary` は `claim_graph` 非依存の retrieval-only 診断にする。
 - `claim_graph` は `include_claim_graph=true` 時のみ構築する（on-demand）。
 - `include_claim_graph=true` 時は semantic cache をバイパスし、payload混在を避ける。
-- 公開MCP compact経路では `next_actions=[]` を維持し、`inline_hits` を主導線にする。
+- 公開MCP compact経路では `next_actions=[]` を維持し、既定で同梱される `inline_hits` を主導線にする。
+- 現行運用プロファイルでは semantic cache の非完全一致（embedding 類似検索）は採用せず、正規化後 exact cache を前提に運用する。
 
 棄却した案（理由つき）:
 

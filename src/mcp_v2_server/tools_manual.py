@@ -49,13 +49,7 @@ READ_MAX_SECTIONS = 20
 READ_MAX_CHARS = 12000
 MANUAL_IO_MAX_CHARS_MIN = 256
 MANUAL_IO_MAX_CHARS_MAX = 50000
-TOC_DEFAULT_MAX_FILES = 20
-TOC_MAX_FILES_WITHOUT_HEADINGS = 200
-TOC_MAX_FILES_WITHOUT_PREFIX = 50
-TOC_MAX_FILES_DEEP = 50
 TOC_SCOPE_HARD_LIMIT = 200
-TOC_DEFAULT_MAX_HEADINGS_PER_FILE = 20
-TOC_MAX_HEADINGS_PER_FILE = 200
 NUMBER_PATTERN = re.compile(r"\d+")
 NOISE_PATH_TERMS = ("目次", "toc", "index")
 NUMBER_CONTEXT_TERMS = {normalize_text(term) for term in ("手術番号", "附番", "別表", "番号")}
@@ -417,17 +411,6 @@ def _out_from_trace_payload(
             "next_actions": next_actions,
             "applied": applied,
         }
-    if not compact:
-        selected_gate_out = trace_payload.get("selected_gate")
-        if not isinstance(selected_gate_out, str):
-            selected_gate_out = applied.get("selected_gate")
-        if isinstance(selected_gate_out, str):
-            out["selected_gate"] = selected_gate_out
-        gate_selection_reason_out = trace_payload.get("gate_selection_reason")
-        if not isinstance(gate_selection_reason_out, str):
-            gate_selection_reason_out = applied.get("gate_selection_reason")
-        if isinstance(gate_selection_reason_out, str):
-            out["gate_selection_reason"] = gate_selection_reason_out
     if include_claim_graph and not compact:
         out["claim_graph"] = (trace_payload.get("claim_graph") or {})
     return out
@@ -746,24 +729,10 @@ def _ensure_not_manuals_root_id(state: AppState, manual_id: str) -> None:
     )
 
 
-def _normalize_toc_cursor(cursor: Any) -> dict[str, Any]:
-    if cursor is None:
-        return {}
-    if isinstance(cursor, dict):
-        return cursor
-    if isinstance(cursor, (int, str)):
-        return {"offset": _parse_int_param(cursor, name="cursor", default=0, min_value=0)}
-    raise ToolError("invalid_parameter", "cursor must be an object (offset) or an integer/string offset")
-
-
 def manual_toc(
     state: AppState,
     manual_id: str,
     path_prefix: str | None = None,
-    max_files: int | None = None,
-    cursor: dict[str, Any] | int | str | None = None,
-    depth: str | None = None,
-    max_headings_per_file: int | None = None,
 ) -> dict[str, Any]:
     applied_manual_id = _require_manual_id(manual_id, name="manual_id")
     _ensure_not_manuals_root_id(state, applied_manual_id)
@@ -775,40 +744,6 @@ def manual_toc(
     )
 
     applied_path_prefix = normalize_relative_path(path_prefix) if isinstance(path_prefix, str) and path_prefix.strip() else ""
-    if depth is None:
-        applied_depth = "shallow"
-    else:
-        ensure(isinstance(depth, str), "invalid_parameter", "depth must be shallow or deep")
-        applied_depth = depth.strip().lower()
-        ensure(applied_depth in {"shallow", "deep"}, "invalid_parameter", "depth must be shallow or deep")
-    applied_include_headings = applied_depth == "deep"
-    if applied_include_headings:
-        ensure(bool(applied_path_prefix), "invalid_parameter", "path_prefix is required when depth=deep")
-    max_limit = TOC_MAX_FILES_DEEP if applied_include_headings else TOC_MAX_FILES_WITHOUT_HEADINGS
-    default_max_files = min(TOC_DEFAULT_MAX_FILES, max_limit)
-    applied_max_files = _parse_int_param(
-        max_files,
-        name="max_files",
-        default=default_max_files,
-        min_value=1,
-        max_value=max_limit,
-    )
-    if not applied_path_prefix and applied_max_files > TOC_MAX_FILES_WITHOUT_PREFIX:
-        raise ToolError(
-            "invalid_parameter",
-            f"max_files must be <= {TOC_MAX_FILES_WITHOUT_PREFIX} when path_prefix is empty",
-        )
-    applied_max_headings_per_file = _parse_int_param(
-        max_headings_per_file,
-        name="max_headings_per_file",
-        default=TOC_DEFAULT_MAX_HEADINGS_PER_FILE,
-        min_value=1,
-        max_value=TOC_MAX_HEADINGS_PER_FILE,
-    )
-    cursor_obj = _normalize_toc_cursor(cursor)
-    offset = _parse_int_param(cursor_obj.get("offset"), name="cursor.offset", default=0, min_value=0)
-
-    items: list[dict[str, Any]] = []
     files = sorted(list_manual_files(state.config.manuals_root, manual_id=applied_manual_id), key=lambda row: row.path)
     if applied_path_prefix:
         prefix = f"{applied_path_prefix}/"
@@ -818,33 +753,12 @@ def manual_toc(
         "needs_narrow_scope",
         f"toc scope too large: {len(files)} files (limit={TOC_SCOPE_HARD_LIMIT}); narrow path_prefix",
     )
-    ensure(offset <= len(files), "invalid_parameter", "cursor.offset out of range")
-    page = files[offset : offset + applied_max_files]
-    for row in page:
-        file_path = resolve_inside_root(state.config.manuals_root / applied_manual_id, row.path, must_exist=True)
-        headings: list[dict[str, Any]] = []
-        if applied_include_headings:
-            text = file_path.read_text(encoding="utf-8")
-            if row.file_type == "md":
-                for node in parse_markdown_toc(row.path, text)[:applied_max_headings_per_file]:
-                    headings.append({"title": node.title, "line_start": node.line_start})
-            else:
-                headings.append({"title": Path(row.path).name, "line_start": 1})
-        items.append({"path": row.path, "headings": headings})
-    next_offset = offset + len(page)
-    next_cursor = {"offset": next_offset} if next_offset < len(files) else None
     return {
-        "items": items,
+        "items": [{"path": row.path} for row in files],
         "total_files": len(files),
-        "next_cursor": next_cursor,
         "applied": {
             "manual_id": applied_manual_id,
             "path_prefix": applied_path_prefix,
-            "depth": applied_depth,
-            "max_files": applied_max_files,
-            "include_headings": applied_include_headings,
-            "max_headings_per_file": applied_max_headings_per_file,
-            "offset": offset,
         },
     }
 
@@ -939,6 +853,9 @@ def manual_read(
     truncated = False
     output = ""
     applied_mode = "read"
+    fallback_applied_range: dict[str, Any] | None = None
+    fallback_next_cursor: dict[str, Any] | None = None
+    fallback_eof: bool | None = None
 
     if suffix == ".json":
         raise ToolError("invalid_scope", "manual_read supports markdown sections only; use manual_scan for json")
@@ -961,39 +878,64 @@ def manual_read(
         )
         if overlap:
             fallback_start = int(progress.get("next_scan_start") or (section_end + 1))
-            if fallback_start <= len(lines):
-                scan = manual_scan(
-                    state,
-                    manual_id=manual_id,
-                    path=relative_path,
-                    start_line=fallback_start,
-                    max_chars=applied_max_chars,
-                )
+            fallback_char_offset = progress.get("next_scan_char_offset") if progress else None
+            has_remaining_by_offset = (
+                fallback_char_offset is not None and int(fallback_char_offset) < len(text)
+            )
+            if has_remaining_by_offset or fallback_start <= len(lines):
+                if has_remaining_by_offset:
+                    scan = manual_scan(
+                        state,
+                        manual_id=manual_id,
+                        path=relative_path,
+                        cursor={"char_offset": int(fallback_char_offset)},
+                        max_chars=applied_max_chars,
+                    )
+                else:
+                    scan = manual_scan(
+                        state,
+                        manual_id=manual_id,
+                        path=relative_path,
+                        start_line=fallback_start,
+                        max_chars=applied_max_chars,
+                    )
                 output = str(scan.get("text") or "")
                 truncated = bool(scan.get("truncated"))
                 applied_mode = "scan_fallback"
-                applied_range = scan.get("applied_range") or {}
+                fallback_applied_range = scan.get("applied_range") or {}
+                fallback_next_cursor = scan.get("next_cursor") if isinstance(scan.get("next_cursor"), dict) else None
                 eof = bool(scan.get("eof"))
+                fallback_eof = eof
+                raw_next_char_offset = (fallback_next_cursor or {}).get("char_offset")
+                next_scan_char_offset = (
+                    len(text)
+                    if eof
+                    else int(raw_next_char_offset) if raw_next_char_offset is not None else len(text)
+                )
+                applied_range = fallback_applied_range or {}
                 next_scan_start = (len(lines) + 1) if eof else (int(applied_range.get("end_line") or section_end) + 1)
                 state.read_progress[key] = {
                     "last_section_start": section_start,
                     "last_section_end": section_end,
                     "next_scan_start": int(next_scan_start),
+                    "next_scan_char_offset": int(next_scan_char_offset),
                 }
             else:
                 output = "\n".join(lines[target.line_start - 1 : target.line_end])
         else:
             output = "\n".join(lines[target.line_start - 1 : target.line_end])
+            next_scan_char_offset = _char_offset_from_line(text, section_end + 1) if section_end < len(lines) else len(text)
             state.read_progress[key] = {
                 "last_section_start": section_start,
                 "last_section_end": section_end,
                 "next_scan_start": section_end + 1,
+                "next_scan_char_offset": int(next_scan_char_offset),
             }
 
         if applied_mode == "read":
             output, truncated = _trim_text(output, applied_max_chars)
 
-    return {
+    result = {
         "text": output,
         "truncated": truncated,
         "applied": {
@@ -1003,6 +945,11 @@ def manual_read(
             "mode": applied_mode,
         },
     }
+    if applied_mode == "scan_fallback":
+        result["applied_range"] = fallback_applied_range or {}
+        result["next_cursor"] = fallback_next_cursor or {"char_offset": None}
+        result["eof"] = bool(fallback_eof)
+    return result
 
 
 def manual_scan(
@@ -4587,8 +4534,6 @@ def manual_find(
             "trace_id": trace_id,
             "summary": summary,
             "next_actions": next_actions,
-            "selected_gate": selected_gate,
-            "gate_selection_reason": gate_selection_reason,
             "applied": applied_out,
         }
         if applied_include_claim_graph:

@@ -69,16 +69,13 @@ def test_is_subpath_casefold_supports_windows_paths() -> None:
     assert _is_subpath_casefold(outside, root) is False
 
 
-def test_manual_toc_groups_headings_by_path(state) -> None:
+def test_manual_toc_returns_paths_only(state) -> None:
     out = manual_toc(
         state,
         manual_id="m1",
         path_prefix="rules.md",
-        depth="deep",
     )
-    rules = next(x for x in out["items"] if x["path"] == "rules.md")
-    assert len(rules["headings"]) >= 3
-    assert all("title" in h and "line_start" in h for h in rules["headings"])
+    assert out["items"] == [{"path": "rules.md"}]
 
 
 def test_manual_ls_navigates_one_level_by_id(state) -> None:
@@ -133,23 +130,16 @@ def test_manual_ls_allows_root_call_again_after_selection(state) -> None:
     assert again["id"] == "manuals"
 
 
-def test_manual_toc_defaults_to_shallow(state) -> None:
+def test_manual_toc_defaults_to_path_only_listing(state) -> None:
     out = manual_toc(state, manual_id="m1")
     first = out["items"][0]
-    assert first["headings"] == []
-    assert out["applied"]["depth"] == "shallow"
+    assert set(first.keys()) == {"path"}
 
 
 def test_manual_toc_accepts_manual_id_with_outer_spaces(state) -> None:
-    out = manual_toc(state, manual_id=" m1 ", max_files=1)
+    out = manual_toc(state, manual_id=" m1 ")
     assert out["applied"]["manual_id"] == "m1"
-    assert len(out["items"]) == 1
-
-
-def test_manual_toc_deep_requires_path_prefix(state) -> None:
-    with pytest.raises(ToolError) as e:
-        manual_toc(state, manual_id="m1", depth="deep")
-    assert e.value.code == "invalid_parameter"
+    assert len(out["items"]) >= 1
 
 
 def test_manual_toc_rejects_root_manuals_id_with_guidance(state) -> None:
@@ -173,56 +163,15 @@ def test_manual_toc_path_prefix_filters_scope(state) -> None:
     assert {item["path"] for item in out["items"]} == {"sub/inside.md"}
 
 
-def test_manual_toc_supports_pagination(state) -> None:
+def test_manual_toc_returns_full_scope_without_pagination_fields(state) -> None:
     manual_dir = state.config.manuals_root / "m1" / "docs"
     manual_dir.mkdir(parents=True, exist_ok=True)
     for idx in range(3):
         (manual_dir / f"f{idx}.md").write_text(f"# H{idx}\n", encoding="utf-8")
-    first = manual_toc(
-        state,
-        manual_id="m1",
-        path_prefix="docs",
-        depth="deep",
-        max_files=2,
-    )
-    assert len(first["items"]) == 2
-    assert first["next_cursor"] == {"offset": 2}
-    second = manual_toc(
-        state,
-        manual_id="m1",
-        path_prefix="docs",
-        depth="deep",
-        max_files=2,
-        cursor=first["next_cursor"],
-    )
-    assert len(second["items"]) == 1
-    assert second["next_cursor"] is None
-
-
-def test_manual_toc_rejects_large_max_files_without_path_prefix(state) -> None:
-    with pytest.raises(ToolError) as e:
-        manual_toc(
-            state,
-            manual_id="m1",
-            max_files=51,
-        )
-    assert e.value.code == "invalid_parameter"
-
-
-def test_manual_toc_rejects_large_max_files_with_deep(state) -> None:
-    manual_dir = state.config.manuals_root / "m1" / "docs"
-    manual_dir.mkdir(parents=True, exist_ok=True)
-    for idx in range(51):
-        (manual_dir / f"f{idx}.md").write_text(f"# H{idx}\n", encoding="utf-8")
-    with pytest.raises(ToolError) as e:
-        manual_toc(
-            state,
-            manual_id="m1",
-            path_prefix="docs",
-            depth="deep",
-            max_files=51,
-        )
-    assert e.value.code == "invalid_parameter"
+    out = manual_toc(state, manual_id="m1", path_prefix="docs")
+    assert len(out["items"]) == 3
+    assert "next_cursor" not in out
+    assert set(out["applied"].keys()) == {"manual_id", "path_prefix"}
 
 
 def test_manual_toc_returns_needs_narrow_scope_on_hard_limit(state) -> None:
@@ -235,7 +184,6 @@ def test_manual_toc_returns_needs_narrow_scope_on_hard_limit(state) -> None:
             state,
             manual_id="m1",
             path_prefix="wide",
-            max_files=50,
         )
     assert e.value.code == "needs_narrow_scope"
 
@@ -317,6 +265,67 @@ def test_manual_read_section_repeated_request_uses_scan_fallback(state) -> None:
     assert first["applied"]["mode"] == "read"
     assert second["applied"]["mode"] == "scan_fallback"
     assert "## ②" in second["text"]
+    assert second["applied_range"]["start_line"] == 4
+    assert second["next_cursor"] == {"char_offset": None}
+    assert second["eof"] is True
+
+
+def test_manual_read_scan_fallback_returns_next_cursor_for_manual_scan_continuation(state) -> None:
+    manual_dir = state.config.manuals_root / "m1"
+    (manual_dir / "multi_long.md").write_text(
+        "# 章\n## ①\nA\n## ②\n" + ("x" * 400) + "\n## ③\nC\n",
+        encoding="utf-8",
+    )
+    first = manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "multi_long.md", "start_line": 2},
+    )
+    second = manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "multi_long.md", "start_line": 2},
+        max_chars=256,
+    )
+    assert first["applied"]["mode"] == "read"
+    assert second["applied"]["mode"] == "scan_fallback"
+    assert second["truncated"] is True
+    assert second["next_cursor"]["char_offset"] is not None
+    continuation = manual_scan(
+        state,
+        manual_id="m1",
+        path="multi_long.md",
+        cursor=second["next_cursor"],
+        max_chars=256,
+    )
+    assert continuation["applied_range"]["start_line"] >= second["applied_range"]["start_line"]
+    assert continuation["text"] != ""
+
+
+def test_manual_read_scan_fallback_continues_across_repeated_requests_on_last_line(state) -> None:
+    manual_dir = state.config.manuals_root / "m1"
+    (manual_dir / "multi_last_line_long.md").write_text(
+        "# 章\n## ①\nA\n## ②\n" + ("x" * 700),
+        encoding="utf-8",
+    )
+    manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "multi_last_line_long.md", "start_line": 2},
+    )
+    second = manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "multi_last_line_long.md", "start_line": 2},
+        max_chars=256,
+    )
+    third = manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "multi_last_line_long.md", "start_line": 2},
+        max_chars=256,
+    )
+    assert second["applied"]["mode"] == "scan_fallback"
+    assert second["truncated"] is True
+    assert second["next_cursor"]["char_offset"] is not None
+    assert third["applied"]["mode"] == "scan_fallback"
+    assert third["applied_range"]["start_line"] == 5
+    assert third["text"] != ""
 
 
 def test_manual_read_ignores_ref_target_hint(state) -> None:
@@ -743,6 +752,8 @@ def test_manual_find_relaxes_required_terms_when_candidates_degrade(state) -> No
     assert out["applied"]["required_terms"] == ["免責"]
     assert out["applied"]["required_terms_df_filtered"] == []
     assert out["applied"]["selected_gate"] in {"g_req", "g0"}
+    assert "selected_gate" not in out
+    assert "gate_selection_reason" not in out
     assert hits["total"] >= 5
     assert all("gate_rrf" in ((item.get("ref") or {}).get("signals") or []) for item in hits["items"])
 
