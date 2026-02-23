@@ -13,8 +13,7 @@ def test_manual_flow_e2e(state) -> None:
     top_ref = dict(top["ref"])
     if "manual_id" not in top_ref and hits.get("manual_id"):
         top_ref["manual_id"] = hits["manual_id"]
-    scope = "section" if top_ref["path"].endswith(".md") else "file"
-    read = manual_read(state, ref=top_ref, scope=scope)
+    read = manual_read(state, ref=top_ref)
     assert len(read["text"]) > 0
 
 

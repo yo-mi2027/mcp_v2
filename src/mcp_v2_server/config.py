@@ -37,7 +37,6 @@ class Config:
     workspace_root: Path
     manuals_root: Path
     vault_root: Path
-    log_level: str
     adaptive_tuning: bool
     adaptive_stats_path: Path
     adaptive_min_recall: float
@@ -60,6 +59,7 @@ class Config:
     manual_find_query_decomp_max_sub_queries: int
     manual_find_query_decomp_rrf_k: int
     manual_find_query_decomp_base_weight: float
+    manual_find_claim_graph_enabled: bool
     manual_find_scan_hard_cap: int
     manual_find_per_file_candidate_cap: int
     manual_find_file_prescan_enabled: bool
@@ -84,7 +84,6 @@ class Config:
             workspace_root=workspace_root,
             manuals_root=manuals_root,
             vault_root=vault_root,
-            log_level=os.getenv("LOG_LEVEL", "info"),
             adaptive_tuning=_env_bool("ADAPTIVE_TUNING", True),
             adaptive_stats_path=Path(
                 os.getenv("ADAPTIVE_STATS_PATH", str(vault_root / ".system" / "adaptive_stats.jsonl"))
@@ -109,6 +108,7 @@ class Config:
             manual_find_query_decomp_max_sub_queries=_env_int("MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES", 3),
             manual_find_query_decomp_rrf_k=_env_int("MANUAL_FIND_QUERY_DECOMP_RRF_K", 60),
             manual_find_query_decomp_base_weight=_env_float("MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT", 0.30),
+            manual_find_claim_graph_enabled=_env_bool("MANUAL_FIND_CLAIM_GRAPH_ENABLED", True),
             manual_find_scan_hard_cap=_env_int("MANUAL_FIND_SCAN_HARD_CAP", 5000),
             manual_find_per_file_candidate_cap=_env_int("MANUAL_FIND_PER_FILE_CANDIDATE_CAP", 8),
             manual_find_file_prescan_enabled=_env_bool("MANUAL_FIND_FILE_PRESCAN_ENABLED", True),

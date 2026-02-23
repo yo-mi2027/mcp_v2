@@ -186,6 +186,16 @@ def evaluate_manual_find(
             summary = found.get("summary") or {}
             applied = found.get("applied") if isinstance(found.get("applied"), dict) else {}
             applied_expand_scope = bool(applied.get("expand_scope")) if "expand_scope" in applied else False
+            sem_cache_hit = bool(applied.get("sem_cache_hit")) if "sem_cache_hit" in applied else False
+            sem_cache_mode = str(applied.get("sem_cache_mode") or "unknown")
+            sem_cache_score_raw = applied.get("sem_cache_score")
+            sem_cache_score = float(sem_cache_score_raw) if isinstance(sem_cache_score_raw, (int, float)) else None
+            sem_cache_latency_saved_raw = applied.get("sem_cache_latency_saved_ms")
+            sem_cache_latency_saved_ms = (
+                max(0, int(sem_cache_latency_saved_raw))
+                if isinstance(sem_cache_latency_saved_raw, (int, float))
+                else None
+            )
             hits = manual_hits(state, trace_id=trace_id, kind="candidates", offset=0, limit=top_k)
             hit_items = [item for item in (hits.get("items") or []) if isinstance(item, dict)]
             top_paths: list[str] = []
@@ -210,6 +220,7 @@ def evaluate_manual_find(
             forbidden_hit = any(path in forbidden_paths for path in top_paths) if forbidden_paths else False
             latency_ms = int((time.monotonic() - started) * 1000)
             est_tokens = _estimate_case_tokens(summary, hit_items)
+            integration_status = str(summary.get("integration_status") or "unknown")
             rows.append(
                 {
                     "case_id": case_id,
@@ -229,9 +240,16 @@ def evaluate_manual_find(
                     "precision_retrieved": round(precision_retrieved, 4),
                     "gap": int(summary.get("gap_count", 0)) > 0,
                     "conflict": int(summary.get("conflict_count", 0)) > 0,
+                    "integration_status": integration_status,
+                    "needs_followup": integration_status == "needs_followup",
+                    "blocked": integration_status == "blocked",
                     "forbidden_hit": forbidden_hit,
                     "requested_expand_scope": bool(expand_scope),
                     "applied_expand_scope": applied_expand_scope,
+                    "sem_cache_hit": sem_cache_hit,
+                    "sem_cache_mode": sem_cache_mode,
+                    "sem_cache_score": round(sem_cache_score, 4) if sem_cache_score is not None else None,
+                    "sem_cache_latency_saved_ms": sem_cache_latency_saved_ms,
                     "est_tokens": est_tokens,
                     "error": None,
                 }
@@ -256,9 +274,16 @@ def evaluate_manual_find(
                     "precision_retrieved": 0.0,
                     "gap": False,
                     "conflict": False,
+                    "integration_status": None,
+                    "needs_followup": False,
+                    "blocked": False,
                     "forbidden_hit": False,
                     "requested_expand_scope": bool(expand_scope),
                     "applied_expand_scope": None,
+                    "sem_cache_hit": False,
+                    "sem_cache_mode": "error",
+                    "sem_cache_score": None,
+                    "sem_cache_latency_saved_ms": None,
                     "est_tokens": 0,
                     "error": {"code": e.code, "message": e.message},
                 }
@@ -283,9 +308,16 @@ def evaluate_manual_find(
                     "precision_retrieved": 0.0,
                     "gap": False,
                     "conflict": False,
+                    "integration_status": None,
+                    "needs_followup": False,
+                    "blocked": False,
                     "forbidden_hit": False,
                     "requested_expand_scope": bool(expand_scope),
                     "applied_expand_scope": None,
+                    "sem_cache_hit": False,
+                    "sem_cache_mode": "error",
+                    "sem_cache_score": None,
+                    "sem_cache_latency_saved_ms": None,
                     "est_tokens": 0,
                     "error": {"code": "unknown", "message": str(e)},
                 }
@@ -300,6 +332,7 @@ def evaluate_manual_find(
     mrr_key = f"mrr@{top_k}"
     case_latencies = [float(row["latency_ms"]) for row in rows]
     case_tokens = [float(row.get("est_tokens") or 0.0) for row in rows]
+    sem_cache_latency_saved_values = [float(row.get("sem_cache_latency_saved_ms") or 0.0) for row in rows]
     metrics = {
         hit_key: round(sum(1 for row in rows if row["hit"]) / total_cases, 4),
         recall_key: round(sum(float(row["recall"]) for row in rows) / total_cases, 4),
@@ -308,8 +341,22 @@ def evaluate_manual_find(
         "precision@retrieved": round(sum(float(row["precision_retrieved"]) for row in rows) / total_cases, 4),
         "gap_rate": round(sum(1 for row in rows if row["gap"]) / total_cases, 4),
         "conflict_rate": round(sum(1 for row in rows if row["conflict"]) / total_cases, 4),
+        "needs_followup_rate": round(sum(1 for row in rows if row.get("needs_followup")) / total_cases, 4),
+        "blocked_rate": round(sum(1 for row in rows if row.get("blocked")) / total_cases, 4),
         "p95_latency_ms": round(_percentile(case_latencies, 95), 2),
         "tokens_per_query": round(sum(case_tokens) / total_cases, 2),
+        "sem_cache_hit_rate": round(sum(1 for row in rows if row.get("sem_cache_hit")) / total_cases, 4),
+        "sem_cache_exact_hit_rate": round(
+            sum(1 for row in rows if row.get("sem_cache_mode") == "exact") / total_cases, 4
+        ),
+        "sem_cache_semantic_hit_rate": round(
+            sum(1 for row in rows if row.get("sem_cache_mode") == "semantic") / total_cases, 4
+        ),
+        "sem_cache_guard_revalidate_rate": round(
+            sum(1 for row in rows if row.get("sem_cache_mode") == "guard_revalidate") / total_cases, 4
+        ),
+        "sem_cache_est_latency_saved_ms_total": round(sum(sem_cache_latency_saved_values), 2),
+        "sem_cache_est_latency_saved_ms_per_query": round(sum(sem_cache_latency_saved_values) / total_cases, 2),
         "error_rate": round(sum(1 for row in rows if not row["ok"]) / total_cases, 4),
         "forbidden_hit_rate": round(sum(1 for row in rows if row["forbidden_hit"]) / total_cases, 4),
     }
@@ -347,6 +394,7 @@ def build_eval_report(
     include_claim_graph: bool,
     budget_time_ms: int,
     budget_max_candidates: int,
+    manual_find_claim_graph_enabled: bool | None = None,
 ) -> dict[str, Any]:
     applied_values = {
         row.get("applied_expand_scope")
@@ -359,18 +407,22 @@ def build_eval_report(
         applied_expand_scope = sorted(bool(v) for v in applied_values)
     else:
         applied_expand_scope = None
+    find_options: dict[str, Any] = {
+        "expand_scope": bool(expand_scope),
+        "requested_expand_scope": bool(expand_scope),
+        "applied_expand_scope": applied_expand_scope,
+        "include_claim_graph": include_claim_graph,
+        "budget": {"time_ms": budget_time_ms, "max_candidates": budget_max_candidates},
+    }
+    if manual_find_claim_graph_enabled is not None:
+        find_options["manual_find_claim_graph_enabled"] = bool(manual_find_claim_graph_enabled)
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dataset_path": dataset_path.as_posix(),
         "dataset_hash": _hash_file(dataset_path),
         "top_k": top_k,
-        "find_options": {
-            "expand_scope": bool(expand_scope),
-            "requested_expand_scope": bool(expand_scope),
-            "applied_expand_scope": applied_expand_scope,
-            "include_claim_graph": include_claim_graph,
-            "budget": {"time_ms": budget_time_ms, "max_candidates": budget_max_candidates},
-        },
+        "find_options": find_options,
         "metrics": results["metrics"],
         "thresholds": results["thresholds"],
         "pass_fail": results["pass_fail"],

@@ -47,6 +47,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run two evaluations (query decomposition + RRF off/on) and emit a comparison report.",
     )
+    parser.add_argument(
+        "--compare-claim-graph",
+        action="store_true",
+        help="Run two evaluations (manual_find claim_graph internals off/on) and emit a comparison report.",
+    )
     return parser.parse_args()
 
 
@@ -104,6 +109,7 @@ def _run_once(
         include_claim_graph=include_claim_graph,
         budget_time_ms=budget_time_ms,
         budget_max_candidates=budget_max_candidates,
+        manual_find_claim_graph_enabled=cfg.manual_find_claim_graph_enabled,
     )
 
 
@@ -136,10 +142,15 @@ def main() -> int:
     compare_count = (
         int(bool(args.compare_sem_cache))
         + int(bool(args.compare_query_decomp))
+        + int(bool(args.compare_claim_graph))
     )
     if compare_count > 1:
         print("choose only one compare mode", file=sys.stderr)
         return 2
+    if args.compare_claim_graph:
+        # This mode measures the cost/impact of actually building claim_graph.
+        # Force graph construction in both arms so the config toggle has effect.
+        include_claim_graph = True
 
     if args.compare_sem_cache:
         baseline_report = _run_once(
@@ -174,6 +185,13 @@ def main() -> int:
                 "baseline_passed": bool(baseline_report["pass_fail"]["all_passed"]),
                 "with_sem_cache_passed": bool(sem_cache_report["pass_fail"]["all_passed"]),
                 "p95_latency_ms_delta": delta.get("p95_latency_ms"),
+                "tokens_per_query_delta": delta.get("tokens_per_query"),
+                "sem_cache_hit_rate_delta": delta.get("sem_cache_hit_rate"),
+                "sem_cache_exact_hit_rate_delta": delta.get("sem_cache_exact_hit_rate"),
+                "sem_cache_semantic_hit_rate_delta": delta.get("sem_cache_semantic_hit_rate"),
+                "sem_cache_est_latency_saved_ms_per_query_delta": delta.get(
+                    "sem_cache_est_latency_saved_ms_per_query"
+                ),
                 f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
                 f"recall@{top_k}_delta": delta.get(f"recall@{top_k}"),
                 f"mrr@{top_k}_delta": delta.get(f"mrr@{top_k}"),
@@ -220,6 +238,50 @@ def main() -> int:
                 f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
             },
         }
+    elif args.compare_claim_graph:
+        baseline_report = _run_once(
+            cfg=replace(base_cfg, manual_find_claim_graph_enabled=False),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        claim_graph_report = _run_once(
+            cfg=replace(base_cfg, manual_find_claim_graph_enabled=True),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        delta = _metric_delta(baseline_report["metrics"], claim_graph_report["metrics"])
+        report = {
+            "mode": "claim_graph_compare",
+            "baseline": baseline_report,
+            "with_claim_graph": claim_graph_report,
+            "metrics_delta": delta,
+            "comparison_summary": {
+                "include_claim_graph_forced": True,
+                "baseline_passed": bool(baseline_report["pass_fail"]["all_passed"]),
+                "with_claim_graph_passed": bool(claim_graph_report["pass_fail"]["all_passed"]),
+                "p95_latency_ms_delta": delta.get("p95_latency_ms"),
+                "tokens_per_query_delta": delta.get("tokens_per_query"),
+                "gap_rate_delta": delta.get("gap_rate"),
+                "conflict_rate_delta": delta.get("conflict_rate"),
+                "needs_followup_rate_delta": delta.get("needs_followup_rate"),
+                f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
+                f"recall@{top_k}_delta": delta.get(f"recall@{top_k}"),
+                f"mrr@{top_k}_delta": delta.get(f"mrr@{top_k}"),
+                f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
+            },
+        }
     else:
         report = _run_once(
             cfg=base_cfg,
@@ -233,7 +295,7 @@ def main() -> int:
             dataset_path=dataset_path,
         )
 
-    if args.compare_sem_cache or args.compare_query_decomp:
+    if args.compare_sem_cache or args.compare_query_decomp or args.compare_claim_graph:
         print(json.dumps(report["comparison_summary"], ensure_ascii=False, indent=2))
     else:
         print(json.dumps({"metrics": report["metrics"], "pass_fail": report["pass_fail"]}, ensure_ascii=False, indent=2))
@@ -248,6 +310,11 @@ def main() -> int:
             baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
             query_decomp_pass = bool(report["with_query_decomp"]["pass_fail"]["all_passed"])
             if not (baseline_pass and query_decomp_pass):
+                return 1
+        elif args.compare_claim_graph:
+            baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
+            claim_graph_pass = bool(report["with_claim_graph"]["pass_fail"]["all_passed"])
+            if not (baseline_pass and claim_graph_pass):
                 return 1
         elif not report["pass_fail"]["all_passed"]:
             return 1

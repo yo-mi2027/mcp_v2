@@ -1,9 +1,16 @@
 # 統合MCPサーバ v2 要件定義（現行運用版）
 
-最終更新: 2026-02-20
+最終更新: 2026-02-23
 
 本書は現行実装の要件を運用向けに整理した文書である。  
 入出力の正本契約は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md` を優先する。
+
+## 0. 文書責務（正本/要約）
+
+- 本書は公開スコープ、非機能要件、運用要件、評価指標、観測性の要件整理を担当する。
+- ツールI/O契約（型、既定値、値域、返却shape、エラー条件）の正本は `spec_v2.md` / `spec_manuals.md` / `spec_vault.md`。
+- 本書に出てくるツール仕様の記述は運用観点の要約であり、厳密な契約定義としては扱わない。
+- 同一ルールの詳細値を更新する場合はまず spec 系を更新し、本書は必要な範囲だけ追随更新する。
 
 ## 1. 背景
 
@@ -44,32 +51,24 @@
 
 ### 3.1 Manual探索
 
-- `manual_find` は lexical-only（語彙一致）で候補化する。
-- `manual_find` の `required_terms` は必須で、`1..2` 語を受け付ける。
-- `manual_find` は `g0(requiredなし)` と `g_req(requiredあり)` を常時実行し、RRF融合で最終候補を決定する。
-- `g_req` が0件の場合のみ `g0`（requiredなし）を採用する。
-- `required_terms` のDFガードは診断情報を返し、`too_rare` は語を保持、`too_common` は除外する。
-- `manual_find` は `required_effect_status` / `required_failure_reason` / strict/filtered候補数を返し、required失敗タイプを呼び出し側が判別できるようにする。
+本節は運用要件の要約であり、`manual_*` の厳密なI/O/制約/エラー契約は `spec_manuals.md` を正本とする。
+
+- `manual_find` は `required_terms` 前提の探索で `g0/g_req` を統合し、required語の効き具合を診断値として返す。
+- 一次候補は lexical中心に候補化し、coverage/proximity等のシグナルで再ランキングする（詳細な係数・シグナル定義は `rag_design_v2.md` と実装を参照）。
 - 導線は `manual_find`（+ `manual_hits`）を基本とし、網羅要求の入力時のみ `manual_scan` 優先導線を許可する。
-- 一次候補のスコアリングは `idf × tf` を基礎とし、coverage/phrase/number-context/proximity の加点とノイズ減点で再ランキングする。
-- lexical係数（coverage/phrase/number-context/proximity/length-penalty）は環境変数で調整可能とする。
-- `MANUAL_FIND_EXPLORATION_*` により、探索バケット（低prior候補）を混在させて recall を底上げする。
-- 結果は `trace_id` を中心に返し、詳細は `manual_hits` で段階取得できる。
-- `manual_hits(kind="candidates")` は `matched_tokens` / `token_hits` / `match_coverage` / `rank_explain` を返せる。
-- 公開MCPツール（`app.py`）の `manual_find` / `manual_hits` は常時最小レスポンスを返す（compact固定）。
-- 統合判断として `claim_graph` を内部生成し、要約として `summary` と `next_actions` を返す。
-- `manual_id` は必須（未指定/空文字は `invalid_parameter`）。
-- `expand_scope` は boolean 入力のみ許可する（後方互換のため受理。検索スコープ拡張は行わない）。
-- `SEM_CACHE_ENABLED=true` の場合、`manual_find` は `exact` -> `semantic` の順で cache lookup を行う。
-- cache key は `manual_id` / `budget` / `manuals_fingerprint`（+ `required_terms`）で分離し、manual更新時は自動無効化する。
-- `manual_toc` は対象ファイル数が 200 件を超える場合に `needs_narrow_scope` を返し、`path_prefix` の絞り込みを要求する。
+- 結果は `trace_id` 中心で返し、候補詳細は `manual_hits`、本文は `manual_read` / `manual_scan` で段階取得する。
+- 公開MCPツール（`app.py`）の `manual_find` / `manual_hits` は常時 compact 経路を使い、返答トークンを抑制する。
+- compact `manual_find` は `next_actions=[]` を返し、必要時のみ `inline_hits`（`integrated_top` 先頭ページ）を同梱できる。
+- `summary` は retrieval-only の軽量診断であり、`claim_graph` は任意の詳細診断（`include_claim_graph=true` 時のみ）として扱う。
+- `manual_find` は semantic cache（exact -> semantic）を利用可能とし、manual更新時は fingerprint ベースで自動無効化する。
 - `only_unscanned_from_trace_id` 指定時は cache をバイパスし、未探索優先フローを維持する。
+- `manual_toc` は対象ファイル数が大きい場合に `needs_narrow_scope` を返し、`path_prefix` による段階的な絞り込みを要求する。
 
 ### 3.2 Manual本文取得
 
-- `manual_read` は `snippet|section|sections|file` の段階取得を提供する。
-- `.md` の `file` は安全制約（`ALLOW_FILE_SCOPE=true`）を満たす場合のみ許可。
-- `.json` は `file` 読みを基本とし、`section|sections` は不許可。
+- `manual_read` は markdown の `section` 取得専用とする（JSONは対象外）。
+- `manual_read` の同一セクション再要求時は、同一ファイルの次行から `manual_scan` 相当の自動フォールバックを行う。
+- `manual_scan` は逐次取得の主手段であり、ページング/継続取得のI/O契約は `spec_manuals.md` を正本とする。
 
 ### 3.3 Vault操作
 
@@ -81,7 +80,7 @@
 
 ### 3.4 Eval駆動RAG（manual_find系）
 
-- 評価は `manual_find` を中心とし、取得品質（retrieval）と統合品質（integration）を分離して測定する。
+- 評価は `manual_find` を中心とし、取得品質（retrieval）と軽量診断（`summary`）を分離して測定する。
 - 評価データセットは少なくとも次を持つ:
   - `query`
   - `manual_id`（必須）
@@ -99,7 +98,7 @@
   - `p95_latency_ms`（評価対象呼び出しの95パーセンタイル遅延）
   - `tokens_per_query`（要約+候補メタ情報から推定した1クエリ当たりトークン量）
 - CIゲートは閾値ベースで実施し、閾値未達時は失敗とする。
-- 本番運用のトークン消費を抑えるため、通常運用では `include_claim_graph=false` を既定運用とし、詳細評価はバッチ/CIで実行する。
+- 本番運用のトークン消費とレイテンシを抑えるため、通常運用では `include_claim_graph=false` を既定運用とし、詳細評価はバッチ/CIで `include_claim_graph=true` を明示して実行する。
 
 ## 4. 安全要件
 
@@ -114,27 +113,15 @@
 - 整数型パラメータに `true/false` を渡した場合も `invalid_parameter` を返す。
 - 下限/上限違反も `invalid_parameter` を返す。
 - 実装内部の変換失敗を `conflict` にフォールバックしない。
-
-主な境界条件:
-
-- `budget.time_ms >= 1`
-- `budget.max_candidates >= 1`
-- `offset >= 0`
-- `limit >= 1`
-- `manual_read.max_sections = 20`
-- `manual_read.max_chars = 12000`
-- `manual_scan.max_chars = 12000`
-- `vault_read.max_chars = 12000`
-- `vault_scan.max_chars = 12000`
-- `start_line >= 1`
-- `max_replacements >= 0`
+- 具体的なパラメータ別の値域・既定値は `spec_manuals.md` / `spec_vault.md` / `spec_v2.md` を正本とする（本書では再掲しない）。
 
 ## 6. 観測性要件
 
-- ツール呼び出しログは JSONL で stderr に出力する。
+- ツール呼び出しのエラーログは JSONL で stderr に出力する（成功呼び出しは既定では出力しない）。
 - `manual_find` の軽量統計は `ADAPTIVE_STATS_PATH` に永続化する。
 - 統計には本文を保存しない（メタ情報のみ）。
 - `manual_find` 統計には少なくとも `sem_cache_hit`, `sem_cache_mode`, `sem_cache_score`, `latency_saved_ms`, `scoring_mode` を含める。
+- `TraceStore` / Semantic Cache に保存する `manual_find` の `trace_payload` は、required/gate診断を `applied` 配下へ集約し、トップレベル重複を避ける。
 - Eval実行結果は再現可能な形式（JSON/JSONL）で保存し、比較可能なサマリを生成する。
 - Eval結果には少なくとも次を含める: 実行日時、評価データセットID（またはハッシュ）、指標値、しきい値判定結果。
 
@@ -178,6 +165,8 @@
   - 以後は hard fail（閾値未達でCI失敗）
 - Eval結果はファイル保存せず、CLI標準出力で確認する。
 - Semantic Cache比較時は `scripts/eval_manual_find.py --compare-sem-cache` を利用し、`baseline` と `with_sem_cache` の差分 (`metrics_delta`) を記録する。
+- `sem_cache_compare` の比較サマリには少なくとも `tokens_per_query_delta` と cache 効率指標（例: `sem_cache_hit_rate`, `sem_cache_exact_hit_rate`, 推定短縮時間差分）を含める。
+- 現行実装の embedding provider は `none` のみのため、当面の比較は exact cache 中心の評価として扱う（semantic hit は通常 0）。
 - Eval結果JSONには少なくとも次を含める:
   - `dataset_hash`
   - `metrics`
@@ -193,3 +182,21 @@
 ## 11. 改訂提案（参考）
 
 - `manual_find` の lexical-only 再設計案（未実装）: `docs/proposals/manual_find_lexical_rebuild.md`
+
+## 12. 設計判断（2026-02-23）
+
+採用した方針:
+
+- `manual_find.summary` は `claim_graph` 非依存の retrieval-only 診断にする。
+- `claim_graph` は `include_claim_graph=true` 時のみ構築する（on-demand）。
+- `include_claim_graph=true` 時は semantic cache をバイパスし、payload混在を避ける。
+- 公開MCP compact経路では `next_actions=[]` を維持し、`inline_hits` を主導線にする。
+
+棄却した案（理由つき）:
+
+- `claim_graph` を常時構築したまま `summary` だけ使う案:
+  - 検索精度の改善がA/Bで確認できず、CPU/レイテンシだけ増えやすかったため。
+- `claim_graph` を即時完全削除する案:
+  - `include_claim_graph=true` の診断用途と比較評価（A/B）を一度に失い、移行リスクが高いため。まず必須経路から外した。
+- facet を `condition` / `amount` へ即拡張する案:
+  - ドメイン依存が強まり汎用性を下げる一方、unknown低減の効果量が未計測だったため。先に `claim_graph` 自体を任意機能へ降格した。

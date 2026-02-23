@@ -1,6 +1,11 @@
 # 統合MCPサーバ v2 Vault仕様（現行）
 
-最終更新: 2026-02-19
+最終更新: 2026-02-23
+
+更新注記（2026-02-23）:
+
+- 今回の改訂は主に manual 系（`manual_find` / `manual_read` / `manual_scan`）の設計整理であり、Vault I/O 契約の変更はない。
+- 採用/棄却した案の理由は `requirements.md` の設計判断節を参照。
 
 ## 1. Tool Catalog
 

@@ -1,15 +1,24 @@
 # 統合MCPサーバ v2 Manual仕様（現行）
 
-最終更新: 2026-02-20
+最終更新: 2026-02-23
+
+本書は `manual_*` ツールのI/O契約・入力制約・返却形式の正本である。  
+設計意図/探索フローは `rag_design_v2.md`、運用要件/SLO/観測性は `requirements.md` を参照。
+
+重複防止ルール:
+
+- `manual_*` のパラメータ型、既定値、値域、返却shape、エラー条件は本書を正本とする。
+- `rag_design_v2.md` / `requirements.md` に同内容を再掲する場合は要約のみとし、詳細値は本書へリンクする。
+- 文書間で差分が出た場合は本書を優先し、他文書は追随修正する。
 
 ## 1. Tool Catalog
 
 - `manual_ls({ id? })`
 - `manual_toc({ manual_id, path_prefix?, max_files?, cursor?, depth?, max_headings_per_file? })`
-- `manual_find({ query, manual_id, required_terms, expand_scope?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache? })`
+- `manual_find({ query, manual_id, required_terms, expand_scope?, only_unscanned_from_trace_id?, budget?, include_claim_graph?, use_cache?, inline_hits? })`
 - `manual_hits({ trace_id, kind?, offset?, limit? })`
-- `manual_read({ ref, scope?, allow_file?, expand? })`
-- `manual_scan({ manual_id, path, start_line?, cursor? })`
+- `manual_read({ ref, max_chars? })`
+- `manual_scan({ manual_id, path, start_line?, cursor?, max_chars? })`
 
 ## 2. `manual_ls`
 
@@ -119,6 +128,9 @@ Input:
   "only_unscanned_from_trace_id": "string | null",
   "include_claim_graph": "boolean | null",
   "use_cache": "boolean | null",
+  "inline_hits": {
+    "limit": "number | null"
+  },
   "budget": {
     "max_candidates": "number | null",
     "time_ms": "number | null"
@@ -165,7 +177,12 @@ Output:
     "required_top_k": "number",
     "required_top_hits": "number",
     "selected_gate": "single|single_base|single_required|g0|g_req",
-    "gate_selection_reason": "string | null"
+    "gate_selection_reason": "string | null",
+    "sem_cache_used": "boolean",
+    "sem_cache_hit": "boolean",
+    "sem_cache_mode": "bypass|miss|exact|semantic|guard_revalidate",
+    "sem_cache_score": "number | null",
+    "sem_cache_latency_saved_ms": "number | null"
   },
   "claim_graph?": {
     "claims": [
@@ -237,6 +254,14 @@ Output:
   "candidates": "number",
   "status": "required_effective|term_dropped_or_weakened|required_none_matched|required_fallback",
   "failure_reason": "string | null",
+  "inline_hits?": {
+    "trace_id": "string",
+    "kind": "integrated_top",
+    "offset": "0",
+    "limit": "number",
+    "total": "number",
+    "items": "array"
+  },
   "next_actions": [
     {
       "type": "manual_hits|manual_read|manual_find|manual_scan",
@@ -248,14 +273,15 @@ Output:
 
 固定ルール:
 
-- `claim_graph` が統合の本体で、`summary` は `claim_graph` 由来の派生指標。
+- `summary` は retrieval-only の軽量診断であり、`claim_graph` 非依存に算出する。
 - 一次候補の検索スコアは lexical-only（`idf × tf`）を基礎とし、coverage/phrase/number-context/proximity の加点とノイズ減点で構成する。
 - lexical加減点の係数は環境変数（`LEXICAL_*`）で調整可能。
 - `MANUAL_FIND_EXPLORATION_*` により、候補集合に探索バケット（低prior候補）を固定比率で混在させる。
-- `include_claim_graph=true` のときのみ `claim_graph` を返す。
+- `include_claim_graph=true` のときのみ `claim_graph` を構築して返す（feature flag有効時）。
+- `include_claim_graph=true` でも feature flag（`MANUAL_FIND_CLAIM_GRAPH_ENABLED`）が無効な場合は空の `claim_graph` を返す。
 - 公開MCPツール（`app.py`）では常時最小レスポンスを返すため、`include_claim_graph=true` でも `claim_graph` は返さない。
-- `summary.conflict_count` と `manual_hits(kind="conflicts").total` は一致する。
-- `summary.gap_count` と `manual_hits(kind="gaps").total` は一致する。
+- `summary.conflict_count` と `manual_hits(kind="conflicts").total` は一致する（現行 retrieval-only 実装では通常 `0`）。
+- `summary.gap_count` と `manual_hits(kind="gaps").total` は一致する（`gaps` は retrieval-gap のプレースホルダ行を返しうる）。
 - `manual_id` は必須（未指定/空文字は `invalid_parameter`）。
 - `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
 - 検索スコープは常に指定 `manual_id` 配下に限定する（manual間の自動拡張は行わない）。
@@ -284,9 +310,17 @@ Output:
 - Query decomposition + RRF 有効時は、sub-query 失敗を許容して継続し、全sub-query失敗または結合候補0件時のみ通常検索にフォールバックする。
 - `expand_scope` と `include_claim_graph` と `use_cache` は boolean のみ許可（非booleanは `invalid_parameter`）。
 - `use_cache` 未指定時は `SEM_CACHE_ENABLED` 設定値を適用する。
+- `include_claim_graph=true` の場合は semantic cache をバイパスする（payload形状/意味の混在を避けるため）。
 - 公開MCPツール（`app.py`）の `manual_find` 出力は最小形式（`trace_id`, `candidates`, `status`, `failure_reason`, `next_actions`）を返す。
+- `inline_hits` を指定した場合、公開MCPツール（`app.py`）の `manual_find` は `manual_hits(kind="integrated_top", offset=0, compact=true)` と同形の `inline_hits` を同梱する。
+- `inline_hits.limit` は整数かつ `>= 1`。公開MCPツールでは最大 `5` 件に制限する（超過値は `5` に丸める）。
+- 公開MCPツール（`app.py`）の compact `next_actions` は常に空配列（`[]`）を返す（誘導は返さない）。
 - 公開MCPツール（`app.py`）の `next_actions[]` は `type` と `params` のみを返し、`confidence` は省略する。
 - cache hit でも `summary.gap_count/conflict_count` が閾値（`SEM_CACHE_MAX_SUMMARY_GAP/SEM_CACHE_MAX_SUMMARY_CONFLICT`）を超える場合は再探索する。
+- 非compact `manual_find` は `applied.sem_cache_*` 診断（used/hit/mode/score/latency_saved_ms）を返す。
+- 公開MCPツール（`app.py`）の compact `manual_find` は `applied` を返さないため、`sem_cache_*` 診断は返さない。
+- 内部 `trace_payload` / Semantic Cache 保存payloadでは、required/gate 診断（`required_*`, `selected_gate`, `gate_selection_reason`）は `applied` に集約して保持し、トップレベルへ重複保存しない。
+- 旧形式trace（トップレベルに同診断キーを持つpayload）を読み出した場合は、実装側で `applied` へ後方互換補完して返却する。
 - `budget.time_ms` 既定値は `60000`、`budget.max_candidates` 既定値は `200`。
 - `budget.time_ms` と `budget.max_candidates` は整数かつ `>= 1`。
 - `manual_find` は動的カットオフを適用し、返却候補数は `min(budget.max_candidates, 50)` を上限として score/coverage に応じてさらに縮小しうる。
@@ -328,6 +362,10 @@ Output:
 - `offset` / `limit` は `true/false` を許可しない（`invalid_parameter`）。
 - `kind=candidates` の `items[]` は圧縮形式を返す（`target/json_path/title` は返さない）。
 - `kind=candidates` で全件の `manual_id` が同一なら、`manual_id` はレスポンス上位に1回だけ返し、`items[].ref.manual_id` は省略する。
+- `kind in {"claims","evidences","edges"}` は、直前の `manual_find` で `include_claim_graph=true` を指定しなかった場合は空配列を返す。
+- `kind in {"claims","evidences","edges"}` は、feature flag により `claim_graph` 構築が無効な場合も空配列を返す。
+- `kind=gaps` は retrieval-only `summary.gap_count` に合わせた診断行（プレースホルダ含む）を返す。
+- `kind=conflicts` は retrieval-only `summary.conflict_count` に合わせた診断行を返す（現行実装では通常空）。
 - 公開MCPツール（`app.py`）の `kind in {"candidates","integrated_top"}` は常に最小形式（`ref`, `score`, `matched_tokens` と、`integrated_top` のみ `title`）を返す。
 
 ## 6. `manual_read`
@@ -341,25 +379,19 @@ Input:
     "path": "string",
     "start_line": "number | null"
   },
-  "scope": "snippet|section|sections|file|null",
-  "allow_file": "boolean | null",
-  "expand": {
-    "before_chars": "number | null",
-    "after_chars": "number | null"
-  }
+  "max_chars": "number | null"
 }
 ```
 
 固定ルール:
 
-- `.md` 既定 `scope=section`、`.json` 既定 `scope=file`。
+- `manual_read` は markdown の section 取得専用。`.json` は対象外（`manual_scan` を使用する）。
 - `ref.manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
-- `.md` の `scope=file` は `ALLOW_FILE_SCOPE=true` かつ `allow_file=true` 必須。
-- `allow_file` は boolean のみ許可（非booleanは `invalid_parameter`）。
-- `.json` で `scope=section|sections` は `invalid_scope`。
-- `max_sections` は固定値 `20`、`max_chars` は固定値 `12000`。
-- `expand.before_chars` / `expand.after_chars` は整数かつ `>= 0`。
-- `.md` の `scope=section` で同一セクション再要求を検知した場合は、同一ファイルの次行から `manual_scan` 相当の自動フォールバックを行う。
+- `scope` は後方互換入力として `null|"section"` のみ許可し、それ以外は `invalid_parameter`。
+- `allow_file` / `expand` は受理しない（`invalid_parameter`）。
+- `max_chars` は整数のみ許可。未指定時は既定値 `12000`。範囲は `256..50000`。
+- `ref.start_line` は見出し開始行に一致する section 指定として扱う。未指定時は先頭section。
+- 同一セクション再要求を検知した場合は、同一ファイルの次行から `manual_scan` 相当の自動フォールバックを行う。
 
 Output:
 
@@ -368,8 +400,8 @@ Output:
   "text": "string",
   "truncated": "boolean",
   "applied": {
-    "scope": "snippet|section|sections|file",
-    "max_sections": "number | null",
+    "scope": "section",
+    "max_sections": "null",
     "max_chars": "number",
     "mode": "read|scan_fallback"
   }
@@ -388,7 +420,8 @@ Input:
   "cursor": {
     "start_line": "number | null",
     "char_offset": "number | null"
-  } | "number | string (char_offset shorthand) | null"
+  } | "number | string (char_offset shorthand) | null",
+  "max_chars": "number | null"
 }
 ```
 
@@ -398,7 +431,7 @@ Input:
 - `cursor` は object 形式に加えて、`char_offset` の shorthand として `number|string` も許可する。
 - `manual_id="manuals"`（root id）は受理しない。`manual_ls(id="manuals").items[].id` を使用する。
 - `start_line`（または `cursor.start_line`）は整数かつ対象ファイルの総行数範囲内のみ許可。
-- `max_chars` は固定値 `12000`（`SCAN_MAX_CHARS`）で、入力から変更不可。
+- `max_chars` は整数のみ許可。未指定時は既定値 `12000`（`SCAN_MAX_CHARS`）。範囲は `256..50000`。
 
 Output:
 
@@ -422,3 +455,20 @@ Output:
   }
 }
 ```
+
+## 8. 設計判断メモ（2026-02-23）
+
+採用:
+
+- `summary` は retrieval-only 診断として扱い、`claim_graph` 非依存で算出する。
+- `claim_graph` は `include_claim_graph=true` の要求時のみ構築する（通常経路の負荷削減）。
+- `manual_read` は section-only に限定し、逐次読解は `manual_scan` に寄せる。
+
+棄却:
+
+- `claim_graph` 常時構築 + `summary` への常時反映案:
+  - retrieval 指標の改善が確認できず、`needs_followup` の過剰化とレイテンシ増を招きやすかったため。
+- `manual_read` で `snippet|sections|file` を維持する案:
+  - APIの複雑性に対して利用価値が低く、`manual_scan` と役割が重複していたため。
+- `claim_graph` の facet を増やして（例 `condition`, `amount`）継続利用する案:
+  - 辞書依存が強まり汎用性を損ないやすく、unknown低減の効果が未検証だったため。

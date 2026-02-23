@@ -42,7 +42,7 @@ def create_state(config: Config | None = None) -> AppState:
         semantic_cache = NoopSemanticCacheStore()
     return AppState(
         config=cfg,
-        logger=JsonlLogger(level=cfg.log_level),
+        logger=JsonlLogger(),
         traces=TraceStore(max_keep=cfg.trace_max_keep, ttl_sec=cfg.trace_ttl_sec),
         adaptive_stats=AdaptiveStatsWriter(cfg.adaptive_stats_path),
         semantic_cache=semantic_cache,

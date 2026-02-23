@@ -1,11 +1,16 @@
 # 統合MCPサーバ v2 共通仕様（現行）
 
-最終更新: 2026-02-21
+最終更新: 2026-02-23
 
 ## 1. スコープ
 
 本ファイルは現行の公開ツールと共通契約を定義する。  
 詳細I/Oは `spec_manuals.md` と `spec_vault.md` を参照。
+
+更新注記（2026-02-23）:
+
+- `manual_find.summary` / `claim_graph` の設計整理は `spec_manuals.md` を正本とする。
+- 採用/棄却した案の理由は `requirements.md` の設計判断節を参照。
 
 ## 2. 現行公開ツール
 
@@ -26,7 +31,6 @@
 - `WORKSPACE_ROOT`（既定: `.`）
 - `MANUALS_ROOT`（既定: `${WORKSPACE_ROOT}/manuals`）
 - `VAULT_ROOT`（既定: `${WORKSPACE_ROOT}/vault`）
-- `LOG_LEVEL`（既定: `info`）
 - `ADAPTIVE_TUNING`（既定: `true`）
 - `ADAPTIVE_STATS_PATH`（既定: `${VAULT_ROOT}/.system/adaptive_stats.jsonl`）
 - `ADAPTIVE_MIN_RECALL`（既定: `0.90`）
@@ -62,6 +66,12 @@
 - `SEM_CACHE_EMBEDDING_PROVIDER`（既定: `none`）
 - `SEM_CACHE_MAX_SUMMARY_GAP`（既定: `-1`）
 - `SEM_CACHE_MAX_SUMMARY_CONFLICT`（既定: `-1`）
+
+注:
+
+- 現行実装の `SEM_CACHE_EMBEDDING_PROVIDER` は `none` のみサポート。
+- そのため既定運用では semantic cache の類似検索は実質無効で、cache hit は exact match 中心となる。
+- `SEM_CACHE_SIM_THRESHOLD` は非 `none` provider 実装時に有効化される想定の設定値。
 
 ## 4. 共通安全要件
 
@@ -118,7 +128,8 @@ Actionオブジェクト:
 - `params` は最小パラメータのみ返す
 - manuals系では `manual_hits|manual_read|manual_find|manual_scan` を取りうる
 - 公開MCPツール（`app.py`）では `manual_find` / `manual_hits` は常時compact返却（選択不可）
-- 公開MCPツール（`app.py`）の `manual_find` は軽量化のため `next_actions[]` から `confidence` を省略し、`type` と `params` のみ返す
+- 公開MCPツール（`app.py`）の compact `manual_find` は `next_actions` を返却契約上は保持するが、常に空配列（`[]`）を返す
+- 公開MCPツール（`app.py`）の compact `manual_find` は必要に応じて `inline_hits`（`manual_hits(kind="integrated_top", offset=0, compact=true)` と同形、`limit<=5`）を同梱できる
 
 ## 8. 非公開/廃止
 

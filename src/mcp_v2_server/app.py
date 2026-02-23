@@ -55,48 +55,6 @@ def _execute(state: AppState, tool: str, fn: Callable[..., dict[str, Any]], *arg
         _enforce_discovery_order(state, tool)
         out = fn(*args, **kwargs)
         _mark_discovery_seen(state, tool)
-        fields: dict[str, Any] = {}
-        if isinstance(out, dict):
-            if tool == "manual_find":
-                fields["trace_id"] = out.get("trace_id")
-                summary = out.get("summary") or {}
-                for key in (
-                    "scanned_files",
-                    "scanned_nodes",
-                    "candidates",
-                    "file_bias_ratio",
-                    "conflict_count",
-                    "gap_count",
-                    "integration_status",
-                ):
-                    if key in summary:
-                        fields[key] = summary[key]
-                fields["next_actions"] = out.get("next_actions")
-            elif tool == "vault_read":
-                fields["path"] = kwargs.get("path")
-                fields["truncated"] = out.get("truncated")
-            elif tool == "vault_ls":
-                fields["path"] = kwargs.get("path")
-                items = out.get("items")
-                fields["items"] = len(items) if isinstance(items, list) else None
-            elif tool == "vault_scan":
-                fields["path"] = kwargs.get("path")
-                fields["applied_range"] = out.get("applied_range")
-                fields["eof"] = out.get("eof")
-                fields["truncated_reason"] = out.get("truncated_reason")
-            elif tool == "manual_scan":
-                fields["manual_id"] = kwargs.get("manual_id")
-                fields["path"] = kwargs.get("path")
-                fields["applied_range"] = out.get("applied_range")
-                fields["eof"] = out.get("eof")
-                fields["truncated_reason"] = out.get("truncated_reason")
-            elif tool == "vault_create":
-                fields["path"] = out.get("written_path")
-                fields["written_bytes"] = out.get("written_bytes")
-            elif tool == "vault_replace":
-                fields["path"] = out.get("written_path")
-                fields["replacements"] = out.get("replacements")
-        state.logger.emit(tool=tool, ok=True, elapsed_ms=int((time.monotonic() - started) * 1000), **fields)
         return out
     except ToolError as e:
         state.logger.emit(tool=tool, ok=False, level="error", elapsed_ms=int((time.monotonic() - started) * 1000), code=e.code)
@@ -147,6 +105,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
         budget: dict[str, Any] | None = None,
         include_claim_graph: bool | None = None,
         use_cache: bool | None = None,
+        inline_hits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -161,6 +120,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 budget=budget,
                 include_claim_graph=include_claim_graph,
                 use_cache=use_cache,
+                inline_hits=inline_hits,
                 compact=True,
             ),
         )
@@ -168,14 +128,12 @@ def create_app(state: AppState | None = None) -> FastMCP:
     @mcp.tool()
     def manual_read(
         ref: dict[str, Any],
-        scope: str | None = None,
-        allow_file: bool | None = None,
-        expand: dict[str, Any] | None = None,
+        max_chars: int | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
             "manual_read",
-            lambda: manual_read_impl(app_state, ref=ref, scope=scope, allow_file=allow_file, expand=expand),
+            lambda: manual_read_impl(app_state, ref=ref, max_chars=max_chars),
         )
 
     @mcp.tool()
@@ -184,6 +142,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
         path: str,
         start_line: int | None = None,
         cursor: dict[str, Any] | int | str | None = None,
+        max_chars: int | None = None,
     ) -> dict[str, Any]:
         return _execute(
             app_state,
@@ -194,6 +153,7 @@ def create_app(state: AppState | None = None) -> FastMCP:
                 path=path,
                 start_line=start_line,
                 cursor=cursor,
+                max_chars=max_chars,
             ),
         )
 

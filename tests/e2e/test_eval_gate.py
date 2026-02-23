@@ -49,6 +49,12 @@ def test_eval_gate_passes_with_reasonable_thresholds(state) -> None:
     assert "recall@1" in out["metrics"]
     assert "mrr@1" in out["metrics"]
     assert "tokens_per_query" in out["metrics"]
+    assert "sem_cache_hit_rate" in out["metrics"]
+    assert "sem_cache_exact_hit_rate" in out["metrics"]
+    assert "sem_cache_semantic_hit_rate" in out["metrics"]
+    assert "sem_cache_est_latency_saved_ms_per_query" in out["metrics"]
+    assert "needs_followup_rate" in out["metrics"]
+    assert "blocked_rate" in out["metrics"]
 
 
 def test_eval_gate_detects_failure(state) -> None:

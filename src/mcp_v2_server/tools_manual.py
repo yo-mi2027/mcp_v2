@@ -7,7 +7,7 @@ import math
 import copy
 import re
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .errors import ToolError, ensure
@@ -47,6 +47,8 @@ FACET_HINTS = {
 SCAN_MAX_CHARS = 12000
 READ_MAX_SECTIONS = 20
 READ_MAX_CHARS = 12000
+MANUAL_IO_MAX_CHARS_MIN = 256
+MANUAL_IO_MAX_CHARS_MAX = 50000
 TOC_DEFAULT_MAX_FILES = 20
 TOC_MAX_FILES_WITHOUT_HEADINGS = 200
 TOC_MAX_FILES_WITHOUT_PREFIX = 50
@@ -85,6 +87,9 @@ PRF_MAX_TERMS = 4
 PRF_TERM_MAX_DF_RATIO = 0.60
 PRF_TERM_WEIGHT = 0.40
 CODE_EXACT_BONUS = 1.60
+CLAIM_GRAPH_STRONG_SUPPORT_MIN_AVG_CONFIDENCE = 0.75
+CLAIM_GRAPH_STRONG_SUPPORT_MAX_EXTRA_FOLLOWUPS = 1
+CLAIM_GRAPH_SEARCH_GAP_EXCLUDED_FACETS = frozenset({"compare"})
 MANUAL_FIND_DYNAMIC_CUTOFF_MAX_CANDIDATES = 50
 MANUAL_FIND_DYNAMIC_CUTOFF_MIN_KEEP = 8
 MANUAL_FIND_DYNAMIC_CUTOFF_MIN_SCORE_RATIO = 0.25
@@ -199,6 +204,18 @@ def _require_non_empty_string(value: Any, *, name: str) -> str:
     return stripped
 
 
+def _require_manual_id(value: Any, *, name: str = "manual_id") -> str:
+    manual_id = _require_non_empty_string(value, name=name)
+    canonical = manual_id.replace("\\", "/")
+    parts = [part for part in PurePosixPath(canonical).parts if part not in {"", "."}]
+    ensure(
+        len(parts) == 1 and parts[0] != "..",
+        "invalid_parameter",
+        f"{name} must be a single manual directory id",
+    )
+    return manual_id
+
+
 def _parse_required_terms_param(value: Any, *, name: str = "required_terms") -> list[str]:
     if value is None:
         return []
@@ -268,21 +285,10 @@ def _manuals_fingerprint(state: AppState, manual_ids: list[str]) -> str:
 
 
 def _compact_next_actions(next_actions: Any) -> list[dict[str, Any]]:
-    if not isinstance(next_actions, list):
-        return []
-    compact_actions: list[dict[str, Any]] = []
-    for item in next_actions:
-        if not isinstance(item, dict):
-            continue
-        action_type = item.get("type")
-        if not isinstance(action_type, str) or not action_type:
-            continue
-        compact_item: dict[str, Any] = {"type": action_type}
-        params = item.get("params")
-        if isinstance(params, dict) and params:
-            compact_item["params"] = params
-        compact_actions.append(compact_item)
-    return compact_actions
+    del next_actions
+    # Public compact responses intentionally avoid planner hints. LLM callers are
+    # expected to choose the next tool call directly.
+    return []
 
 
 def _compact_manual_find_output(
@@ -411,10 +417,17 @@ def _out_from_trace_payload(
             "next_actions": next_actions,
             "applied": applied,
         }
-    if not compact and isinstance(trace_payload.get("selected_gate"), str):
-        out["selected_gate"] = trace_payload.get("selected_gate")
-    if not compact and isinstance(trace_payload.get("gate_selection_reason"), str):
-        out["gate_selection_reason"] = trace_payload.get("gate_selection_reason")
+    if not compact:
+        selected_gate_out = trace_payload.get("selected_gate")
+        if not isinstance(selected_gate_out, str):
+            selected_gate_out = applied.get("selected_gate")
+        if isinstance(selected_gate_out, str):
+            out["selected_gate"] = selected_gate_out
+        gate_selection_reason_out = trace_payload.get("gate_selection_reason")
+        if not isinstance(gate_selection_reason_out, str):
+            gate_selection_reason_out = applied.get("gate_selection_reason")
+        if isinstance(gate_selection_reason_out, str):
+            out["gate_selection_reason"] = gate_selection_reason_out
     if include_claim_graph and not compact:
         out["claim_graph"] = (trace_payload.get("claim_graph") or {})
     return out
@@ -447,6 +460,28 @@ def _apply_cached_request_overrides(
     return patched
 
 
+def _apply_sem_cache_diagnostics_to_trace_payload(
+    *,
+    trace_payload: dict[str, Any],
+    sem_cache_used: bool,
+    sem_cache_hit: bool,
+    sem_cache_mode: str,
+    sem_cache_score: float | None,
+    sem_cache_latency_saved_ms: int | None,
+) -> dict[str, Any]:
+    patched = copy.deepcopy(trace_payload)
+    applied = patched.get("applied")
+    if not isinstance(applied, dict):
+        return patched
+    applied["sem_cache_used"] = sem_cache_used
+    applied["sem_cache_hit"] = sem_cache_hit
+    applied["sem_cache_mode"] = sem_cache_mode
+    applied["sem_cache_score"] = round(sem_cache_score, 4) if sem_cache_score is not None else None
+    applied["sem_cache_latency_saved_ms"] = sem_cache_latency_saved_ms
+    patched["applied"] = applied
+    return patched
+
+
 def _cached_summary_is_acceptable(state: AppState, summary: dict[str, Any]) -> bool:
     try:
         gap_count = int(summary.get("gap_count", 0))
@@ -461,6 +496,50 @@ def _cached_summary_is_acceptable(state: AppState, summary: dict[str, Any]) -> b
     if state.config.sem_cache_max_summary_conflict >= 0 and conflict_count > state.config.sem_cache_max_summary_conflict:
         return False
     return True
+
+
+MANUAL_FIND_INLINE_HITS_LIMIT_DEFAULT = 5
+MANUAL_FIND_INLINE_HITS_LIMIT_MAX = 5
+
+
+def _parse_manual_find_inline_hits_param(inline_hits: Any) -> dict[str, Any] | None:
+    if inline_hits is None:
+        return None
+    if not isinstance(inline_hits, dict):
+        raise ToolError("invalid_parameter", "inline_hits must be object")
+    limit = _parse_int_param(
+        inline_hits.get("limit"),
+        name="inline_hits.limit",
+        default=MANUAL_FIND_INLINE_HITS_LIMIT_DEFAULT,
+        min_value=1,
+    )
+    return {
+        "kind": "integrated_top",
+        "offset": 0,
+        "limit": min(limit, MANUAL_FIND_INLINE_HITS_LIMIT_MAX),
+    }
+
+
+def _attach_manual_find_inline_hits(
+    *,
+    state: AppState,
+    out: dict[str, Any],
+    trace_id: str,
+    inline_hits_spec: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if inline_hits_spec is None:
+        return out
+    inline_hits = manual_hits(
+        state,
+        trace_id=trace_id,
+        kind=str(inline_hits_spec.get("kind") or "integrated_top"),
+        offset=int(inline_hits_spec.get("offset") or 0),
+        limit=int(inline_hits_spec.get("limit") or MANUAL_FIND_INLINE_HITS_LIMIT_DEFAULT),
+        compact=True,
+    )
+    out_with_inline = dict(out)
+    out_with_inline["inline_hits"] = inline_hits
+    return out_with_inline
 
 
 def _record_manual_find_stats(
@@ -565,6 +644,7 @@ def _parse_manual_ls_id(id_value: Any) -> tuple[str, str, str | None]:
         ensure(len(parts) == 3, "invalid_parameter", "invalid id")
         head, manual_id, encoded = parts
         ensure(head == "dir" and bool(manual_id) and bool(encoded), "invalid_parameter", "invalid id")
+        manual_id = _require_manual_id(manual_id, name="id")
         relative_dir = _decode_node_segment(encoded)
         return "dir", manual_id, normalize_relative_path(relative_dir)
     if id_value.startswith("file::"):
@@ -572,10 +652,11 @@ def _parse_manual_ls_id(id_value: Any) -> tuple[str, str, str | None]:
         ensure(len(parts) == 3, "invalid_parameter", "invalid id")
         head, manual_id, encoded = parts
         ensure(head == "file" and bool(manual_id) and bool(encoded), "invalid_parameter", "invalid id")
+        manual_id = _require_manual_id(manual_id, name="id")
         relative_path = _decode_node_segment(encoded)
         return "file", manual_id, normalize_relative_path(relative_path)
     # Plain manual id (ex: "m1") for top-level manual nodes.
-    return "manual", id_value, ""
+    return "manual", _require_manual_id(id_value, name="id"), ""
 
 
 def manual_ls(state: AppState, id: str | None = None) -> dict[str, Any]:
@@ -684,7 +765,7 @@ def manual_toc(
     depth: str | None = None,
     max_headings_per_file: int | None = None,
 ) -> dict[str, Any]:
-    applied_manual_id = _require_non_empty_string(manual_id, name="manual_id")
+    applied_manual_id = _require_manual_id(manual_id, name="manual_id")
     _ensure_not_manuals_root_id(state, applied_manual_id)
     ensure(
         _manual_exists(state.config.manuals_root, applied_manual_id),
@@ -768,13 +849,14 @@ def manual_toc(
     }
 
 
-def _find_md_node(nodes: list[MdNode], start_line: int | None) -> MdNode:
+def _find_md_node(nodes: list[MdNode], start_line: Any) -> MdNode:
     if start_line is None:
         return nodes[0]
+    parsed_start_line = _parse_int_param(start_line, name="ref.start_line", default=1, min_value=1)
     for node in nodes:
-        if node.line_start == start_line:
+        if node.line_start == parsed_start_line:
             return node
-    return nodes[0]
+    raise ToolError("not_found", "section not found for ref.start_line", {"start_line": parsed_start_line})
 
 
 def _char_offset_from_line(text: str, line_no: int) -> int:
@@ -822,11 +904,12 @@ def manual_read(
     scope: str | None = None,
     allow_file: bool | None = None,
     expand: dict[str, Any] | None = None,
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
     ensure(isinstance(ref, dict), "invalid_parameter", "ref must be object")
     ref = dict(ref)
     ref.pop("target", None)
-    manual_id = _require_non_empty_string(ref.get("manual_id"), name="ref.manual_id")
+    manual_id = _require_manual_id(ref.get("manual_id"), name="ref.manual_id")
     _ensure_not_manuals_root_id(state, manual_id)
     ensure(_manual_exists(state.config.manuals_root, manual_id), "not_found", "manual_id not found", {"manual_id": manual_id})
     path_value = ref.get("path")
@@ -837,118 +920,86 @@ def manual_read(
     ensure(full_path.exists() and full_path.is_file(), "not_found", "manual file not found", {"path": relative_path})
 
     suffix = full_path.suffix.casefold()
+    if scope not in {None, "section"}:
+        raise ToolError("invalid_parameter", "manual_read scope is fixed to section")
+    if allow_file is not None:
+        raise ToolError("invalid_parameter", "allow_file is not supported; manual_read is section-only")
+    if expand is not None:
+        raise ToolError("invalid_parameter", "expand is not supported; manual_read is section-only")
+
     text = full_path.read_text(encoding="utf-8")
-    default_scope = "file" if suffix == ".json" else "section"
-    applied_scope = scope or default_scope
-    ensure(applied_scope in {"snippet", "section", "sections", "file"}, "invalid_parameter", "invalid scope")
-    max_sections, max_chars = READ_MAX_SECTIONS, READ_MAX_CHARS
-    applied_allow_file = _parse_bool_param(allow_file, name="allow_file", default=False)
+    applied_scope = "section"
+    applied_max_chars = _parse_int_param(
+        max_chars,
+        name="max_chars",
+        default=READ_MAX_CHARS,
+        min_value=MANUAL_IO_MAX_CHARS_MIN,
+        max_value=MANUAL_IO_MAX_CHARS_MAX,
+    )
     truncated = False
     output = ""
     applied_mode = "read"
 
     if suffix == ".json":
-        if applied_scope in {"section", "sections"}:
-            raise ToolError("invalid_scope", "json does not support section scopes")
-        if applied_scope != "file":
-            applied_scope = "file"
-        output, truncated = _trim_text(text, max_chars)
+        raise ToolError("invalid_scope", "manual_read supports markdown sections only; use manual_scan for json")
     else:
         lines = text.splitlines()
         nodes = parse_markdown_toc(relative_path, text)
         target = _find_md_node(nodes, ref.get("start_line"))
-        if applied_scope == "file":
-            if not state.config.allow_file_scope or not applied_allow_file:
-                raise ToolError("forbidden", "md file scope requires ALLOW_FILE_SCOPE=true and allow_file=true")
-            output = text
-        elif applied_scope == "section":
-            key = f"{manual_id}:{relative_path}"
-            section_start = target.line_start
-            section_end = target.line_end
-            progress = state.read_progress.get(key)
-            overlap = bool(
-                progress
-                and progress.get("last_section_start") is not None
-                and progress.get("last_section_end") is not None
-                and not (
-                    section_end < int(progress["last_section_start"] or 1)
-                    or section_start > int(progress["last_section_end"] or 1)
-                )
+        key = f"{manual_id}:{relative_path}"
+        section_start = target.line_start
+        section_end = target.line_end
+        progress = state.read_progress.get(key)
+        overlap = bool(
+            progress
+            and progress.get("last_section_start") is not None
+            and progress.get("last_section_end") is not None
+            and not (
+                section_end < int(progress["last_section_start"] or 1)
+                or section_start > int(progress["last_section_end"] or 1)
             )
-            if overlap:
-                fallback_start = int(progress.get("next_scan_start") or (section_end + 1))
-                if fallback_start <= len(lines):
-                    scan = manual_scan(
-                        state,
-                        manual_id=manual_id,
-                        path=relative_path,
-                        start_line=fallback_start,
-                    )
-                    output = str(scan.get("text") or "")
-                    truncated = bool(scan.get("truncated"))
-                    applied_mode = "scan_fallback"
-                    applied_range = scan.get("applied_range") or {}
-                    eof = bool(scan.get("eof"))
-                    next_scan_start = (len(lines) + 1) if eof else (int(applied_range.get("end_line") or section_end) + 1)
-                    state.read_progress[key] = {
-                        "last_section_start": section_start,
-                        "last_section_end": section_end,
-                        "next_scan_start": int(next_scan_start),
-                    }
-                else:
-                    output = "\n".join(lines[target.line_start - 1 : target.line_end])
-            else:
-                output = "\n".join(lines[target.line_start - 1 : target.line_end])
+        )
+        if overlap:
+            fallback_start = int(progress.get("next_scan_start") or (section_end + 1))
+            if fallback_start <= len(lines):
+                scan = manual_scan(
+                    state,
+                    manual_id=manual_id,
+                    path=relative_path,
+                    start_line=fallback_start,
+                    max_chars=applied_max_chars,
+                )
+                output = str(scan.get("text") or "")
+                truncated = bool(scan.get("truncated"))
+                applied_mode = "scan_fallback"
+                applied_range = scan.get("applied_range") or {}
+                eof = bool(scan.get("eof"))
+                next_scan_start = (len(lines) + 1) if eof else (int(applied_range.get("end_line") or section_end) + 1)
                 state.read_progress[key] = {
                     "last_section_start": section_start,
                     "last_section_end": section_end,
-                    "next_scan_start": section_end + 1,
+                    "next_scan_start": int(next_scan_start),
                 }
-        elif applied_scope == "sections":
-            selected: list[str] = []
-            start_idx = next((i for i, n in enumerate(nodes) if n.node_id == target.node_id), 0)
-            for node in nodes[start_idx : start_idx + max_sections]:
-                selected.append("\n".join(lines[node.line_start - 1 : node.line_end]))
-            output = "\n\n".join(selected)
+            else:
+                output = "\n".join(lines[target.line_start - 1 : target.line_end])
         else:
-            # snippet
-            line_no = _parse_int_param(ref.get("start_line"), name="ref.start_line", default=1, min_value=1)
-            before_chars = 240
-            after_chars = 240
-            if expand:
-                before_chars = _parse_int_param(
-                    expand.get("before_chars"),
-                    name="expand.before_chars",
-                    default=before_chars,
-                    min_value=0,
-                )
-                after_chars = _parse_int_param(
-                    expand.get("after_chars"),
-                    name="expand.after_chars",
-                    default=after_chars,
-                    min_value=0,
-                )
-            line_no = min(max(1, line_no), max(1, len(lines)))
-            char_cursor = 0
-            for i, line in enumerate(lines, start=1):
-                if i >= line_no:
-                    break
-                char_cursor += len(line) + 1
-            start_char = max(0, char_cursor - before_chars)
-            end_char = min(len(text), char_cursor + len(lines[line_no - 1]) + after_chars)
-            output = text[start_char:end_char]
-            applied_scope = "snippet"
+            output = "\n".join(lines[target.line_start - 1 : target.line_end])
+            state.read_progress[key] = {
+                "last_section_start": section_start,
+                "last_section_end": section_end,
+                "next_scan_start": section_end + 1,
+            }
 
         if applied_mode == "read":
-            output, truncated = _trim_text(output, max_chars)
+            output, truncated = _trim_text(output, applied_max_chars)
 
     return {
         "text": output,
         "truncated": truncated,
         "applied": {
             "scope": applied_scope,
-            "max_sections": max_sections if applied_scope in {"sections", "file"} else None,
-            "max_chars": max_chars,
+            "max_sections": None,
+            "max_chars": applied_max_chars,
             "mode": applied_mode,
         },
     }
@@ -960,8 +1011,9 @@ def manual_scan(
     path: str,
     start_line: int | None = None,
     cursor: dict[str, Any] | int | str | None = None,
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
-    applied_manual_id = _require_non_empty_string(manual_id, name="manual_id")
+    applied_manual_id = _require_manual_id(manual_id, name="manual_id")
     _ensure_not_manuals_root_id(state, applied_manual_id)
     ensure(
         _manual_exists(state.config.manuals_root, applied_manual_id),
@@ -974,7 +1026,13 @@ def manual_scan(
     ensure(full_path.exists() and full_path.is_file(), "not_found", "manual file not found", {"path": relative_path})
 
     text = full_path.read_text(encoding="utf-8")
-    max_chars = SCAN_MAX_CHARS
+    applied_max_chars = _parse_int_param(
+        max_chars,
+        name="max_chars",
+        default=SCAN_MAX_CHARS,
+        min_value=MANUAL_IO_MAX_CHARS_MIN,
+        max_value=MANUAL_IO_MAX_CHARS_MAX,
+    )
     normalized_cursor = _normalize_scan_cursor(cursor)
     if start_line is not None:
         parsed_start_line = _parse_int_param(
@@ -1003,7 +1061,7 @@ def manual_scan(
         applied_start_offset = 0
 
     ensure(applied_start_offset <= len(text), "invalid_parameter", "cursor.char_offset out of range")
-    end_offset = min(len(text), applied_start_offset + max_chars)
+    end_offset = min(len(text), applied_start_offset + applied_max_chars)
     chunk_text = text[applied_start_offset:end_offset]
 
     start_line_no = _line_from_char_offset(text, applied_start_offset)
@@ -1024,7 +1082,7 @@ def manual_scan(
         "eof": eof,
         "truncated": truncated_reason != "none",
         "truncated_reason": truncated_reason,
-        "applied": {"max_chars": max_chars},
+        "applied": {"max_chars": applied_max_chars},
     }
 
 
@@ -1365,10 +1423,18 @@ def _build_claim_graph(
         supports = int(stats["supports"])
         contradicts = int(stats["contradicts"])
         followups = int(stats["followups"])
+        avg_support = (stats["support_conf_sum"] / supports) if supports > 0 else 0.0
         total_edges = supports + contradicts + followups
         if supports > 0 and contradicts > 0:
             status = "conflicted"
         elif supports > 0 and followups <= supports:
+            status = "supported"
+        elif (
+            supports > 0
+            and contradicts == 0
+            and avg_support >= CLAIM_GRAPH_STRONG_SUPPORT_MIN_AVG_CONFIDENCE
+            and followups <= (supports + CLAIM_GRAPH_STRONG_SUPPORT_MAX_EXTRA_FOLLOWUPS)
+        ):
             status = "supported"
         else:
             status = "unresolved"
@@ -1378,7 +1444,6 @@ def _build_claim_graph(
             support_ratio = supports / total_edges
             contradict_ratio = contradicts / total_edges
             followup_ratio = followups / total_edges
-            avg_support = (stats["support_conf_sum"] / supports) if supports > 0 else 0.0
             confidence = (
                 (avg_support * 0.55)
                 + (support_ratio * 0.45)
@@ -1437,10 +1502,28 @@ def _build_summary(
     exception_hits = signal_counts.get("exceptions", 0)
     claims = claim_graph.get("claims", [])
     edges = claim_graph.get("edges", [])
+    unresolved_search_gap_claim_ids = {
+        str(claim.get("claim_id") or "")
+        for claim in claims
+        if (
+            isinstance(claim, dict)
+            and claim.get("status") == "unresolved"
+            and str(claim.get("claim_id") or "")
+            and str(claim.get("facet") or "") not in CLAIM_GRAPH_SEARCH_GAP_EXCLUDED_FACETS
+        )
+    }
     conflicted_claim_count = sum(1 for c in claims if c.get("status") == "conflicted")
-    unresolved_claim_count = sum(1 for c in claims if c.get("status") == "unresolved")
+    unresolved_claim_count = len(unresolved_search_gap_claim_ids)
     contradict_claim_count = len({e.get("from_claim_id") for e in edges if e.get("relation") == "contradicts"})
-    followup_claim_count = len({e.get("from_claim_id") for e in edges if e.get("relation") == "requires_followup"})
+    followup_claim_count = len(
+        {
+            claim_id
+            for e in edges
+            if e.get("relation") == "requires_followup"
+            for claim_id in [str(e.get("from_claim_id") or "")]
+            if claim_id and claim_id in unresolved_search_gap_claim_ids
+        }
+    )
 
     heuristic_gap_count = 0
     if (
@@ -1469,12 +1552,58 @@ def _build_summary(
     return summary
 
 
+def _build_retrieval_summary(
+    *,
+    candidates: list[dict[str, Any]],
+    scanned_files: int,
+    scanned_nodes: int,
+    candidate_low_threshold: int,
+    file_bias_threshold: float,
+) -> dict[str, Any]:
+    total, file_bias, _exception_hits = _candidate_metrics(candidates)
+    heuristic_gap_count = 0
+    if (
+        total == 0
+        or total < candidate_low_threshold
+        or (total >= 5 and file_bias >= file_bias_threshold)
+    ):
+        heuristic_gap_count = 1
+    sufficiency_score = min(1.0, total / 5.0) * (1.0 - min(file_bias, 1.0) * 0.2)
+    status = "ready" if (sufficiency_score >= 0.6 and heuristic_gap_count == 0) else "needs_followup"
+    if total == 0:
+        status = "blocked"
+    return {
+        "scanned_files": scanned_files,
+        "scanned_nodes": scanned_nodes,
+        "candidates": total,
+        "file_bias_ratio": round(file_bias, 4),
+        "conflict_count": 0,
+        "gap_count": heuristic_gap_count,
+        "integration_status": status,
+    }
+
+
 def _claim_coverage_ratio(claim_graph: dict[str, Any]) -> float:
     claims = claim_graph.get("claims") or []
     if not isinstance(claims, list) or not claims:
         return 0.0
     supported = sum(1 for claim in claims if claim.get("status") == "supported")
     return supported / len(claims)
+
+
+def _claim_coverage_ratio_for_search_gaps(claim_graph: dict[str, Any]) -> float:
+    claims = claim_graph.get("claims") or []
+    if not isinstance(claims, list):
+        return 0.0
+    filtered = [
+        claim
+        for claim in claims
+        if isinstance(claim, dict) and str(claim.get("facet") or "") not in CLAIM_GRAPH_SEARCH_GAP_EXCLUDED_FACETS
+    ]
+    if not filtered:
+        return 1.0
+    supported = sum(1 for claim in filtered if claim.get("status") == "supported")
+    return supported / len(filtered)
 
 
 def _candidate_metrics(candidates: list[dict[str, Any]]) -> tuple[int, float, int]:
@@ -3740,12 +3869,13 @@ def manual_find(
     budget: dict[str, Any] | None = None,
     include_claim_graph: bool | None = None,
     use_cache: bool | None = None,
+    inline_hits: dict[str, Any] | None = None,
     compact: bool | None = None,
     record_adaptive_stats: bool = True,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
     query = _require_non_empty_string(query, name="query")
-    applied_manual_id = _require_non_empty_string(manual_id, name="manual_id")
+    applied_manual_id = _require_manual_id(manual_id, name="manual_id")
     _ensure_not_manuals_root_id(state, applied_manual_id)
     ensure(expand_scope is None or isinstance(expand_scope, bool), "invalid_parameter", "expand_scope must be boolean")
     applied_only_unscanned_trace_id: str | None = None
@@ -3796,6 +3926,7 @@ def manual_find(
         name="compact",
         default=False,
     )
+    applied_inline_hits = _parse_manual_find_inline_hits_param(inline_hits)
     applied_max_stage = 3
 
     if budget is None:
@@ -3823,7 +3954,12 @@ def manual_find(
     required_terms_index: SparseIndex | None = None
     prioritize_paths: dict[str, set[str]] | None = None
     escalation_reasons: list[str] = []
-    use_semantic_cache = applied_use_cache and not bool(applied_only_unscanned_trace_id)
+    use_semantic_cache = (
+        applied_use_cache
+        and not bool(applied_only_unscanned_trace_id)
+        and not applied_compact
+        and not applied_include_claim_graph
+    )
     cache_scope_key: str | None = None
     cache_query: str | None = None
     manuals_fp_lookup: str | None = None
@@ -3912,6 +4048,14 @@ def manual_find(
                     if source_latency_ms is not None:
                         elapsed_ms = int((time.monotonic() - started_at) * 1000)
                         latency_saved_ms = max(0, source_latency_ms - elapsed_ms)
+                    cached_trace_payload = _apply_sem_cache_diagnostics_to_trace_payload(
+                        trace_payload=cached_trace_payload,
+                        sem_cache_used=use_semantic_cache,
+                        sem_cache_hit=sem_cache_hit,
+                        sem_cache_mode=sem_cache_mode,
+                        sem_cache_score=sem_cache_score,
+                        sem_cache_latency_saved_ms=latency_saved_ms,
+                    )
                     if record_adaptive_stats:
                         cached_candidates = cached_trace_payload.get("candidates")
                         cached_unscanned = cached_trace_payload.get("unscanned_sections")
@@ -3936,11 +4080,17 @@ def manual_find(
                             scoring_mode="cache",
                         )
                     trace_id = state.traces.create(cached_trace_payload)
-                    return _out_from_trace_payload(
+                    out = _out_from_trace_payload(
                         trace_id=trace_id,
                         trace_payload=cached_trace_payload,
                         include_claim_graph=applied_include_claim_graph,
                         compact=applied_compact,
+                    )
+                    return _attach_manual_find_inline_hits(
+                        state=state,
+                        out=out,
+                        trace_id=trace_id,
+                        inline_hits_spec=applied_inline_hits,
                     )
                 sem_cache_mode = "guard_revalidate"
 
@@ -3965,6 +4115,14 @@ def manual_find(
                     if source_latency_ms is not None:
                         elapsed_ms = int((time.monotonic() - started_at) * 1000)
                         latency_saved_ms = max(0, source_latency_ms - elapsed_ms)
+                    cached_trace_payload = _apply_sem_cache_diagnostics_to_trace_payload(
+                        trace_payload=cached_trace_payload,
+                        sem_cache_used=use_semantic_cache,
+                        sem_cache_hit=sem_cache_hit,
+                        sem_cache_mode=sem_cache_mode,
+                        sem_cache_score=sem_cache_score,
+                        sem_cache_latency_saved_ms=latency_saved_ms,
+                    )
                     if record_adaptive_stats:
                         cached_candidates = cached_trace_payload.get("candidates")
                         cached_unscanned = cached_trace_payload.get("unscanned_sections")
@@ -3989,11 +4147,17 @@ def manual_find(
                             scoring_mode="cache",
                         )
                     trace_id = state.traces.create(cached_trace_payload)
-                    return _out_from_trace_payload(
+                    out = _out_from_trace_payload(
                         trace_id=trace_id,
                         trace_payload=cached_trace_payload,
                         include_claim_graph=applied_include_claim_graph,
                         compact=applied_compact,
+                    )
+                    return _attach_manual_find_inline_hits(
+                        state=state,
+                        out=out,
+                        trace_id=trace_id,
+                        inline_hits_spec=applied_inline_hits,
                     )
                 sem_cache_mode = "guard_revalidate"
 
@@ -4205,82 +4369,70 @@ def manual_find(
         item["score"] = round(final_score, 4)
         item["score_lexical"] = round(final_score, 4)
         item["score_fused"] = round(final_score, 4)
-    claim_graph = _build_claim_graph(
-        query=query,
-        candidates=candidates,
+    claim_graph_enabled = (
+        bool(state.config.manual_find_claim_graph_enabled)
+        and not applied_compact
+        and applied_include_claim_graph
     )
-    summary = _build_summary(
-        claim_graph=claim_graph,
+    if claim_graph_enabled:
+        claim_graph = _build_claim_graph(
+            query=query,
+            candidates=candidates,
+        )
+    else:
+        claim_graph = {
+            "claims": [],
+            "evidences": [],
+            "edges": [],
+            "facets": [],
+        }
+    summary = _build_retrieval_summary(
         candidates=candidates,
         scanned_files=scanned_files,
         scanned_nodes=scanned_nodes,
         candidate_low_threshold=candidate_low_threshold,
         file_bias_threshold=file_bias_threshold,
     )
-    coverage_ratio = _claim_coverage_ratio(claim_graph)
-    if coverage_ratio < state.config.coverage_min_ratio and summary["integration_status"] == "ready":
-        summary["integration_status"] = "needs_followup"
-        escalation_reasons.append("coverage_below_threshold")
     summary_token_estimate = max(1, len(str(summary)) // 4)
     marginal_gain = len(candidates) / summary_token_estimate
     if marginal_gain < state.config.marginal_gain_min and summary["integration_status"] == "ready":
         summary["integration_status"] = "needs_followup"
         escalation_reasons.append("low_marginal_gain")
-    next_actions = _plan_next_actions_with_planner(
-        state=state,
-        summary=summary,
-        query=query,
-        max_stage=applied_max_stage,
-        manual_id=applied_manual_id,
-        candidates=candidates,
-    )
-    if required_effect_status in {"term_dropped_or_weakened", "required_none_matched"}:
-        rewrite_retry_action = {
-            "type": "manual_find",
-            "confidence": 0.6,
-            "params": {
-                "query": query,
-                "manual_id": applied_manual_id,
-                "required_terms": requested_required_terms_for_gate,
-                "expand_scope": False,
-                "use_cache": False,
-            },
-        }
-        if not any(
-            item.get("type") == "manual_find"
-            and isinstance(item.get("params"), dict)
-            and (item.get("params") or {}).get("manual_id") == applied_manual_id
-            and (item.get("params") or {}).get("query") == query
-            for item in next_actions
-            if isinstance(item, dict)
-        ):
-            next_actions.append(rewrite_retry_action)
+    if applied_compact:
+        next_actions = []
+    else:
+        next_actions = _plan_next_actions_with_planner(
+            state=state,
+            summary=summary,
+            query=query,
+            max_stage=applied_max_stage,
+            manual_id=applied_manual_id,
+            candidates=candidates,
+        )
+        if required_effect_status in {"term_dropped_or_weakened", "required_none_matched"}:
+            rewrite_retry_action = {
+                "type": "manual_find",
+                "confidence": 0.6,
+                "params": {
+                    "query": query,
+                    "manual_id": applied_manual_id,
+                    "required_terms": requested_required_terms_for_gate,
+                    "expand_scope": False,
+                    "use_cache": False,
+                },
+            }
+            if not any(
+                item.get("type") == "manual_find"
+                and isinstance(item.get("params"), dict)
+                and (item.get("params") or {}).get("manual_id") == applied_manual_id
+                and (item.get("params") or {}).get("query") == query
+                for item in next_actions
+                if isinstance(item, dict)
+            ):
+                next_actions.append(rewrite_retry_action)
     evidences_by_id = {item["evidence_id"]: item for item in claim_graph.get("evidences", [])}
-    conflict_edges = [item for item in claim_graph.get("edges", []) if item.get("relation") == "contradicts"]
-    followup_edges = [item for item in claim_graph.get("edges", []) if item.get("relation") == "requires_followup"]
     conflict_by_claim: dict[str, dict[str, Any]] = {}
-    for edge in conflict_edges:
-        claim_id = str(edge.get("from_claim_id") or "")
-        if claim_id and claim_id not in conflict_by_claim:
-            conflict_by_claim[claim_id] = edge
-    followup_by_claim: dict[str, dict[str, Any]] = {}
-    for edge in followup_edges:
-        claim_id = str(edge.get("from_claim_id") or "")
-        if claim_id and claim_id not in followup_by_claim:
-            followup_by_claim[claim_id] = edge
-    gap_rows = [
-        {
-            "ref": None,
-            "path": None,
-            "start_line": None,
-            "reason": "gap",
-            "signals": [],
-            "score": None,
-            "conflict_with": [],
-            "gap_hint": f"followup required for claim {claim_id}",
-        }
-        for claim_id in sorted(followup_by_claim.keys())
-    ]
+    gap_rows: list[dict[str, Any]] = []
     while len(gap_rows) < summary["gap_count"]:
         gap_rows.append(
             {
@@ -4320,23 +4472,6 @@ def manual_find(
             "selected_gate": selected_gate,
             "gate_selection_reason": gate_selection_reason,
         },
-        "required_terms_source": required_terms_source,
-        "required_terms_decision_reason": required_terms_decision_reason,
-        "requested_required_terms": requested_required_terms,
-        "required_terms": applied_required_terms,
-        "required_terms_df_filtered": required_terms_df_filtered,
-        "required_terms_relaxed": applied_required_terms_relaxed,
-        "required_terms_relax_reason": required_terms_relax_reason,
-        "required_effect_status": required_effect_status,
-        "required_failure_reason": required_failure_reason,
-        "required_strict_candidates": required_strict_candidates,
-        "required_filtered_candidates": required_filtered_candidates,
-        "required_terms_match_stats": required_terms_match_stats,
-        "required_terms_missing": required_terms_missing,
-        "required_top_k": required_top_k,
-        "required_top_hits": required_top_hits,
-        "selected_gate": selected_gate,
-        "gate_selection_reason": gate_selection_reason,
         "gate_runs": gate_runs,
         "fusion_debug": fusion_debug_rows,
         "claim_graph": claim_graph,
@@ -4434,6 +4569,11 @@ def manual_find(
         "required_top_hits": required_top_hits,
         "selected_gate": selected_gate,
         "gate_selection_reason": gate_selection_reason,
+        "sem_cache_used": use_semantic_cache,
+        "sem_cache_hit": sem_cache_hit,
+        "sem_cache_mode": sem_cache_mode,
+        "sem_cache_score": round(sem_cache_score, 4) if sem_cache_score is not None else None,
+        "sem_cache_latency_saved_ms": latency_saved_ms,
     }
     if applied_compact:
         out = _compact_manual_find_output(
@@ -4453,7 +4593,12 @@ def manual_find(
         }
         if applied_include_claim_graph:
             out["claim_graph"] = claim_graph
-    return out
+    return _attach_manual_find_inline_hits(
+        state=state,
+        out=out,
+        trace_id=trace_id,
+        inline_hits_spec=applied_inline_hits,
+    )
 
 
 def manual_hits(

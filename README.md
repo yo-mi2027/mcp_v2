@@ -287,7 +287,6 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `WORKSPACE_ROOT` (default: `.`)
 - `MANUALS_ROOT` (default: `${WORKSPACE_ROOT}/manuals`)
 - `VAULT_ROOT` (default: `${WORKSPACE_ROOT}/vault`)
-- `LOG_LEVEL` (default: `info`)
 - `ADAPTIVE_TUNING` (default: `true`)
 - `ADAPTIVE_STATS_PATH` (default: `${VAULT_ROOT}/.system/adaptive_stats.jsonl`)
 - `ADAPTIVE_MIN_RECALL` (default: `0.90`)
@@ -325,5 +324,6 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `SEM_CACHE_MAX_SUMMARY_CONFLICT` (default: `-1`, `-1` は無効)
 
 `SEM_CACHE_EMBEDDING_PROVIDER` は現時点では `none` のみサポートします。
+このため現行の `--compare-sem-cache` は主に exact cache の効果測定になります（`semantic` hit は通常発生しません）。
 `manual_find` の `use_cache` パラメータで、リクエスト単位の cache バイパスができます。
 semantic cache はプロセス内メモリ保持です。サーバ再起動でキャッシュはクリアされます。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from pathlib import PureWindowsPath
 
 import pytest
@@ -118,6 +119,12 @@ def test_manual_ls_rejects_non_string_id(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
+def test_manual_ls_rejects_path_traversal_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_ls(state, id="../vault")
+    assert e.value.code == "invalid_parameter"
+
+
 def test_manual_ls_allows_root_call_again_after_selection(state) -> None:
     root = manual_ls(state, id="manuals")
     selected = root["items"][0]["id"]
@@ -150,6 +157,12 @@ def test_manual_toc_rejects_root_manuals_id_with_guidance(state) -> None:
         manual_toc(state, manual_id="manuals")
     assert e.value.code == "invalid_parameter"
     assert "items[].id" in e.value.message
+
+
+def test_manual_toc_rejects_path_traversal_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_toc(state, manual_id="../vault")
+    assert e.value.code == "invalid_parameter"
 
 
 def test_manual_toc_path_prefix_filters_scope(state) -> None:
@@ -237,14 +250,11 @@ def test_manual_ls_rejects_file_id_expansion(state) -> None:
     assert e.value.code == "invalid_parameter"
 
 
-def test_manual_read_json_section_scope_is_invalid(state) -> None:
+def test_manual_read_json_is_invalid_and_suggests_scan(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_read(
-            state,
-            ref={"manual_id": "m1", "path": "policy.json"},
-            scope="section",
-        )
+        manual_read(state, ref={"manual_id": "m1", "path": "policy.json"})
     assert e.value.code == "invalid_scope"
+    assert "manual_scan" in e.value.message
 
 
 def test_manual_read_rejects_non_object_ref(state) -> None:
@@ -261,13 +271,15 @@ def test_manual_read_rejects_non_string_ref_path(state) -> None:
 
 def test_manual_read_rejects_root_manuals_id_with_guidance(state) -> None:
     with pytest.raises(ToolError) as e:
-        manual_read(
-            state,
-            ref={"manual_id": "manuals", "path": "rules.md"},
-            scope="section",
-        )
+        manual_read(state, ref={"manual_id": "manuals", "path": "rules.md"})
     assert e.value.code == "invalid_parameter"
     assert "items[].id" in e.value.message
+
+
+def test_manual_read_rejects_path_traversal_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(state, ref={"manual_id": "../vault", "path": "source.md"})
+    assert e.value.code == "invalid_parameter"
 
 
 def test_manual_read_md_defaults_to_section_scope(state) -> None:
@@ -297,12 +309,10 @@ def test_manual_read_section_repeated_request_uses_scan_fallback(state) -> None:
     first = manual_read(
         state,
         ref={"manual_id": "m1", "path": "multi.md", "start_line": 2},
-        scope="section",
     )
     second = manual_read(
         state,
         ref={"manual_id": "m1", "path": "multi.md", "start_line": 2},
-        scope="section",
     )
     assert first["applied"]["mode"] == "read"
     assert second["applied"]["mode"] == "scan_fallback"
@@ -317,65 +327,78 @@ def test_manual_read_ignores_ref_target_hint(state) -> None:
     assert out["applied"]["scope"] == "section"
 
 
-def test_manual_read_rejects_invalid_scope(state) -> None:
+def test_manual_read_rejects_non_section_scope_override(state) -> None:
     with pytest.raises(ToolError) as e:
         manual_read(
             state,
             ref={"manual_id": "m1", "path": "rules.md", "start_line": 3},
-            scope="bad_scope",
+            scope="file",
         )
     assert e.value.code == "invalid_parameter"
 
 
-def test_manual_read_file_scope_forbidden_when_global_disabled(state) -> None:
+def test_manual_read_rejects_allow_file_parameter(state) -> None:
     with pytest.raises(ToolError) as e:
         manual_read(
             state,
             ref={"manual_id": "m1", "path": "rules.md"},
-            scope="file",
             allow_file=True,
         )
-    assert e.value.code == "forbidden"
+    assert e.value.code == "invalid_parameter"
 
 
-def test_manual_read_file_scope_requires_allow_file_when_global_enabled(state, monkeypatch) -> None:
-    monkeypatch.setenv("ALLOW_FILE_SCOPE", "true")
-    local_state = create_state(Config.from_env())
-    with pytest.raises(ToolError) as e:
-        manual_read(
-            local_state,
-            ref={"manual_id": "m1", "path": "rules.md"},
-            scope="file",
-            allow_file=False,
-        )
-    assert e.value.code == "forbidden"
-
-
-def test_manual_read_file_scope_succeeds_when_enabled_and_allow_file_true(state, monkeypatch) -> None:
-    monkeypatch.setenv("ALLOW_FILE_SCOPE", "true")
-    local_state = create_state(Config.from_env())
-    out = manual_read(
-        local_state,
-        ref={"manual_id": "m1", "path": "rules.md"},
-        scope="file",
-        allow_file=True,
-    )
-    assert out["applied"]["scope"] == "file"
-    assert "## 例外" in out["text"]
-
-
-def test_manual_read_rejects_non_boolean_allow_file(state) -> None:
+def test_manual_read_rejects_expand_parameter(state) -> None:
     with pytest.raises(ToolError) as e:
         manual_read(
             state,
             ref={"manual_id": "m1", "path": "rules.md"},
-            scope="file",
-            allow_file="false",
+            expand={"before_chars": 10, "after_chars": 10},
         )
     assert e.value.code == "invalid_parameter"
 
 
-def test_manual_scan_uses_fixed_max_chars(state) -> None:
+def test_manual_read_rejects_unknown_section_start_line(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(
+            state,
+            ref={"manual_id": "m1", "path": "rules.md", "start_line": 999},
+        )
+    assert e.value.code == "not_found"
+
+
+def test_manual_read_rejects_non_numeric_section_start_line(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(
+            state,
+            ref={"manual_id": "m1", "path": "rules.md", "start_line": "abc"},
+        )
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_read_accepts_custom_max_chars(state) -> None:
+    text = "# 章\n## 長文\n" + ("a" * 400) + "\n"
+    (state.config.manuals_root / "m1" / "read_custom_max_chars.md").write_text(text, encoding="utf-8")
+    out = manual_read(
+        state,
+        ref={"manual_id": "m1", "path": "read_custom_max_chars.md", "start_line": 2},
+        max_chars=300,
+    )
+    assert out["truncated"] is True
+    assert out["applied"]["max_chars"] == 300
+    assert len(out["text"]) == 300
+
+
+def test_manual_read_rejects_out_of_range_max_chars(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_read(
+            state,
+            ref={"manual_id": "m1", "path": "rules.md", "start_line": 3},
+            max_chars=255,
+        )
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_scan_defaults_max_chars_to_12000(state) -> None:
     out = manual_scan(state, manual_id="m1", path="rules.md")
     assert out["applied"]["max_chars"] == 12000
 
@@ -385,6 +408,12 @@ def test_manual_scan_rejects_root_manuals_id_with_guidance(state) -> None:
         manual_scan(state, manual_id="manuals", path="rules.md")
     assert e.value.code == "invalid_parameter"
     assert "manual_ls(id='manuals')" in e.value.message
+
+
+def test_manual_scan_rejects_path_traversal_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_scan(state, manual_id="../vault", path="source.md")
+    assert e.value.code == "invalid_parameter"
 
 
 def test_manual_scan_paginates_until_eof(state) -> None:
@@ -406,6 +435,21 @@ def test_manual_scan_paginates_until_eof(state) -> None:
     assert second["truncated_reason"] == "none"
     assert second["next_cursor"]["char_offset"] is None
     assert len(first["text"]) + len(second["text"]) == len(text)
+
+
+def test_manual_scan_accepts_custom_max_chars(state) -> None:
+    text = ("a" * 12050) + "\nend\n"
+    (state.config.manuals_root / "m1" / "long_custom_max.md").write_text(text, encoding="utf-8")
+    first = manual_scan(state, manual_id="m1", path="long_custom_max.md", max_chars=2000)
+    assert first["applied"]["max_chars"] == 2000
+    assert first["truncated_reason"] == "max_chars"
+    assert first["next_cursor"]["char_offset"] == 2000
+
+
+def test_manual_scan_rejects_out_of_range_max_chars(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_scan(state, manual_id="m1", path="rules.md", max_chars=50001)
+    assert e.value.code == "invalid_parameter"
 
 
 def test_manual_scan_accepts_string_cursor_char_offset(state) -> None:
@@ -469,6 +513,12 @@ def test_manual_find_rejects_non_boolean_compact(state) -> None:
 def test_manual_find_rejects_non_string_manual_id(state) -> None:
     with pytest.raises(ToolError) as e:
         manual_find(state, query="対象外", manual_id=123)  # type: ignore[arg-type]
+    assert e.value.code == "invalid_parameter"
+
+
+def test_manual_find_rejects_path_traversal_manual_id(state) -> None:
+    with pytest.raises(ToolError) as e:
+        manual_find(state, query="対象外", manual_id="../vault")
     assert e.value.code == "invalid_parameter"
 
 
@@ -1164,6 +1214,60 @@ def test_manual_find_summary_uses_minimal_fields(state) -> None:
     }
 
 
+def test_build_summary_ignores_followup_edges_for_non_unresolved_claims() -> None:
+    summary = tools_manual_module._build_summary(
+        claim_graph={
+            "claims": [
+                {"claim_id": "c1", "status": "supported"},
+                {"claim_id": "c2", "status": "conflicted"},
+            ],
+            "edges": [
+                {"from_claim_id": "c1", "relation": "requires_followup"},
+                {"from_claim_id": "c2", "relation": "requires_followup"},
+                {"from_claim_id": "c2", "relation": "contradicts"},
+            ],
+        },
+        candidates=[{"signals": [], "path": "x.md"}],
+        scanned_files=1,
+        scanned_nodes=1,
+        candidate_low_threshold=0,
+        file_bias_threshold=2.0,
+    )
+    assert summary["gap_count"] == 0
+    assert summary["conflict_count"] == 1
+
+
+def test_build_summary_ignores_compare_unresolved_for_search_gap() -> None:
+    summary = tools_manual_module._build_summary(
+        claim_graph={
+            "claims": [
+                {"claim_id": "c1", "facet": "compare", "status": "unresolved"},
+            ],
+            "edges": [
+                {"from_claim_id": "c1", "relation": "requires_followup"},
+            ],
+        },
+        candidates=[{"signals": [], "path": "x.md"}],
+        scanned_files=1,
+        scanned_nodes=1,
+        candidate_low_threshold=0,
+        file_bias_threshold=2.0,
+    )
+    assert summary["gap_count"] == 0
+    assert summary["conflict_count"] == 0
+
+
+def test_claim_coverage_ratio_for_search_gaps_ignores_compare_only_claims() -> None:
+    ratio = tools_manual_module._claim_coverage_ratio_for_search_gaps(
+        {
+            "claims": [
+                {"facet": "compare", "status": "unresolved"},
+            ]
+        }
+    )
+    assert ratio == 1.0
+
+
 def test_manual_find_compact_returns_minimal_fields(state) -> None:
     out = manual_find(state, query="対象外", manual_id="m1", compact=True)
     assert "summary" not in out
@@ -1183,6 +1287,46 @@ def test_manual_find_compact_returns_minimal_fields(state) -> None:
 def test_manual_find_compact_omits_claim_graph_even_when_requested(state) -> None:
     out = manual_find(state, query="対象外", manual_id="m1", include_claim_graph=True, compact=True)
     assert "claim_graph" not in out
+
+
+def test_manual_find_compact_omits_default_happy_path_next_action(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1", compact=True)
+    assert out["next_actions"] == []
+
+
+def test_manual_find_compact_inline_hits_matches_manual_hits_integrated_top(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1", compact=True, inline_hits={"limit": 5})
+    assert "inline_hits" in out
+    inline_hits = out["inline_hits"]
+    direct_hits = manual_hits(state, trace_id=out["trace_id"], kind="integrated_top", offset=0, limit=5, compact=True)
+    assert inline_hits == direct_hits
+    assert inline_hits["kind"] == "integrated_top"
+    assert inline_hits["limit"] == 5
+
+
+def test_manual_find_inline_hits_caps_limit_to_five(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1", compact=True, inline_hits={"limit": 99})
+    inline_hits = out["inline_hits"]
+    assert inline_hits["limit"] == 5
+    assert len(inline_hits["items"]) <= 5
+
+
+def test_manual_find_rejects_non_object_inline_hits(state) -> None:
+    with pytest.raises(ToolError, match="inline_hits must be object"):
+        manual_find(state, query="対象外", manual_id="m1", inline_hits="yes")  # type: ignore[arg-type]
+
+
+def test_manual_find_compact_omits_scan_next_action_for_exhaustive_query(state) -> None:
+    out = manual_find(state, query="全て参照して対象外を教えて", manual_id="m1", compact=True)
+    assert out["next_actions"] == []
+
+
+def test_manual_find_compact_omits_non_default_manual_hits_next_action(state) -> None:
+    state.next_actions_planner = (
+        lambda _payload: [{"type": "manual_hits", "confidence": 0.9, "params": {"kind": "gaps", "offset": 0, "limit": 5}}]
+    )
+    out = manual_find(state, query="対象外", manual_id="m1", compact=True)
+    assert out["next_actions"] == []
 
 
 def test_manual_find_uses_next_actions_planner_output_when_valid(state) -> None:
@@ -1549,6 +1693,34 @@ def test_manual_find_candidate_cap_means_scan_hard_cap(state, monkeypatch) -> No
     assert unscanned["total"] >= 1
 
 
+def test_manual_find_trace_payload_dedupes_required_diagnostics_under_applied(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1", required_terms=["対象外"])
+    payload = state.traces.get(out["trace_id"]) or {}
+    applied = payload.get("applied") or {}
+    duplicate_keys = [
+        "required_terms_source",
+        "required_terms_decision_reason",
+        "requested_required_terms",
+        "required_terms",
+        "required_terms_df_filtered",
+        "required_terms_relaxed",
+        "required_terms_relax_reason",
+        "required_effect_status",
+        "required_failure_reason",
+        "required_strict_candidates",
+        "required_filtered_candidates",
+        "required_terms_match_stats",
+        "required_terms_missing",
+        "required_top_k",
+        "required_top_hits",
+        "selected_gate",
+        "gate_selection_reason",
+    ]
+    for key in duplicate_keys:
+        assert key in applied
+        assert key not in payload
+
+
 def test_manual_find_returns_claim_graph_when_requested(state) -> None:
     out = manual_find(state, query="対象外", manual_id="m1", include_claim_graph=True)
     assert "claim_graph" in out
@@ -1558,13 +1730,31 @@ def test_manual_find_returns_claim_graph_when_requested(state) -> None:
     assert "facets" in out["claim_graph"]
 
 
+def test_manual_find_runs_with_claim_graph_disabled_config(state) -> None:
+    local_state = create_state(replace(state.config, manual_find_claim_graph_enabled=False))
+    out = manual_find(local_state, query="対象外の条件", manual_id="m1", include_claim_graph=True)
+    assert "summary" in out
+    assert "integration_status" in out["summary"]
+    assert out["claim_graph"] == {"claims": [], "evidences": [], "edges": [], "facets": []}
+
+
 def test_manual_find_omits_claim_graph_by_default(state) -> None:
     out = manual_find(state, query="対象外", manual_id="m1")
     assert "claim_graph" not in out
 
 
-def test_manual_hits_supports_claim_graph_kinds(state) -> None:
+def test_manual_hits_claim_graph_kinds_are_empty_by_default(state) -> None:
     out = manual_find(state, query="対象外", manual_id="m1")
+    claims = manual_hits(state, trace_id=out["trace_id"], kind="claims")
+    evidences = manual_hits(state, trace_id=out["trace_id"], kind="evidences")
+    edges = manual_hits(state, trace_id=out["trace_id"], kind="edges")
+    assert claims["total"] == 0
+    assert evidences["total"] == 0
+    assert edges["total"] == 0
+
+
+def test_manual_hits_supports_claim_graph_kinds(state) -> None:
+    out = manual_find(state, query="対象外", manual_id="m1", include_claim_graph=True)
     trace_id = out["trace_id"]
     claims = manual_hits(state, trace_id=trace_id, kind="claims")
     evidences = manual_hits(state, trace_id=trace_id, kind="evidences")
@@ -1587,7 +1777,13 @@ def test_manual_find_gap_count_matches_gap_hits(state) -> None:
 
 
 def test_manual_find_builds_multiple_claims_from_multi_facet_query(state) -> None:
-    out = manual_find(state, query="対象外の条件と手順を教えて", manual_id="m1", expand_scope=True)
+    out = manual_find(
+        state,
+        query="対象外の条件と手順を教えて",
+        manual_id="m1",
+        expand_scope=True,
+        include_claim_graph=True,
+    )
     claims = manual_hits(state, trace_id=out["trace_id"], kind="claims")
     facets = {item["facet"] for item in claims["items"]}
     assert claims["total"] >= 2
@@ -1826,10 +2022,15 @@ def test_manual_find_adaptive_stats_records_sem_cache_fields_on_miss(state, monk
     monkeypatch.setenv("SEM_CACHE_ENABLED", "true")
     local_state = create_state(Config.from_env())
 
-    manual_find(local_state, query="対象外", manual_id="m1")
+    out = manual_find(local_state, query="対象外", manual_id="m1")
     lines = local_state.config.adaptive_stats_path.read_text(encoding="utf-8").splitlines()
     row = json.loads(lines[-1])
 
+    assert out["applied"]["sem_cache_used"] is True
+    assert out["applied"]["sem_cache_hit"] is False
+    assert out["applied"]["sem_cache_mode"] == "miss"
+    assert out["applied"]["sem_cache_score"] is None
+    assert out["applied"]["sem_cache_latency_saved_ms"] is None
     assert row["sem_cache_hit"] is False
     assert row["sem_cache_mode"] == "miss"
     assert row["sem_cache_score"] is None
@@ -1844,10 +2045,15 @@ def test_manual_find_adaptive_stats_records_sem_cache_hit(state, monkeypatch) ->
     local_state = create_state(Config.from_env())
 
     manual_find(local_state, query="対象外", manual_id="m1")
-    manual_find(local_state, query="対象外", manual_id="m1")
+    out = manual_find(local_state, query="対象外", manual_id="m1")
     lines = local_state.config.adaptive_stats_path.read_text(encoding="utf-8").splitlines()
     row = json.loads(lines[-1])
 
+    assert out["applied"]["sem_cache_used"] is True
+    assert out["applied"]["sem_cache_hit"] is True
+    assert out["applied"]["sem_cache_mode"] == "exact"
+    assert isinstance(out["applied"]["sem_cache_latency_saved_ms"], int)
+    assert out["applied"]["sem_cache_latency_saved_ms"] >= 0
     assert row["sem_cache_hit"] is True
     assert row["sem_cache_mode"] == "exact"
     assert row["cutoff_reason"] is None

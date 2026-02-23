@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from mcp_v2_server.app import _execute
@@ -195,7 +193,7 @@ def test_vault_ls_rejects_non_string_path(state) -> None:
     assert e.value.code == "invalid_path"
 
 
-def test_execute_logs_vault_extension_fields(state, capsys) -> None:
+def test_execute_does_not_log_successful_calls(state, capsys) -> None:
     _execute(
         state,
         "vault_ls",
@@ -235,30 +233,7 @@ def test_execute_logs_vault_extension_fields(state, capsys) -> None:
         manual_id="m1",
         path="rules.md",
     )
-    lines = capsys.readouterr().err.strip().splitlines()
-    payloads = [json.loads(line) for line in lines[-6:]]
-
-    assert payloads[0]["tool"] == "vault_ls"
-    assert payloads[0]["path"] is None
-    assert payloads[0]["items"] == 1
-
-    assert payloads[1]["tool"] == "manual_ls"
-
-    assert payloads[2]["tool"] == "vault_read"
-    assert payloads[2]["path"] == "notes.md"
-    assert payloads[2]["truncated"] is True
-
-    assert payloads[3]["tool"] == "vault_create"
-    assert payloads[3]["written_bytes"] == 10
-
-    assert payloads[4]["tool"] == "vault_scan"
-    assert payloads[4]["path"] == "source.md"
-    assert payloads[4]["truncated_reason"] == "chunk_end"
-
-    assert payloads[5]["tool"] == "manual_scan"
-    assert payloads[5]["manual_id"] == "m1"
-    assert payloads[5]["path"] == "rules.md"
-    assert payloads[5]["truncated_reason"] == "chunk_end"
+    assert capsys.readouterr().err == ""
 
 
 def test_execute_requires_manual_ls_before_manual_tools(state) -> None:
