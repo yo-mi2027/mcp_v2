@@ -4,18 +4,6 @@ manuals/**
 !manuals/
 !manuals/.gitkeep
 
-# vault: share top-level entries and all files under .system/
-vault/**
-!vault/
-!vault/*/
-!vault/README.md
-vault/*/**
-!vault/*/.gitkeep
-!vault/.system/
-!vault/.system/**
-vault/.system/adaptive_stats.jsonl
-vault/.system/evals/*.json
-
 # Python environment/cache
 .venv/
 .pytest_cache/
