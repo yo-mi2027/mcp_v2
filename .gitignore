@@ -4,6 +4,11 @@ manuals/**
 !manuals/
 !manuals/.gitkeep
 
+# vault: keep only system metadata
+vault/**
+!vault/.system/
+!vault/.system/**
+
 # Python environment/cache
 .venv/
 .pytest_cache/
