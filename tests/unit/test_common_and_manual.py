@@ -13,6 +13,7 @@ from mcp_v2_server.config import Config
 from mcp_v2_server.errors import ToolError
 from mcp_v2_server.normalization import normalize_text
 from mcp_v2_server.path_guard import _is_subpath_casefold, normalize_relative_path
+from mcp_v2_server.reranker import RerankDiagnostics
 from mcp_v2_server.semantic_cache import SemanticCacheStore
 from mcp_v2_server.state import create_state
 from mcp_v2_server.tools_manual import manual_find as _manual_find_impl
@@ -1527,6 +1528,61 @@ def test_file_diversity_rerank_reduces_same_path_dominance() -> None:
     assert any("file_diversity=" in part for part in (reranked[2].get("rank_explain") or []))
 
 
+def test_model_rerank_reorders_top_n_candidates(state, monkeypatch) -> None:
+    local_state = create_state(replace(state.config, manual_find_reranker_enabled=True, manual_find_reranker_top_n=3))
+    candidates = [
+        {"path": "a.md", "start_line": 1, "_rank_score": 10.0, "score": 10.0, "rank_explain": ["base=10.0"]},
+        {"path": "b.md", "start_line": 1, "_rank_score": 9.0, "score": 9.0, "rank_explain": ["base=9.0"]},
+        {"path": "c.md", "start_line": 1, "_rank_score": 8.0, "score": 8.0, "rank_explain": ["base=8.0"]},
+    ]
+
+    def _mock_score_query_documents(*, query, documents, model_id, device, max_length, batch_size):  # type: ignore[no-untyped-def]
+        assert query == "条件"
+        assert len(documents) == 3
+        return [0.1, 0.9, 0.3], RerankDiagnostics(applied=True, mode="applied", reason=None, scored=3)
+
+    monkeypatch.setattr(tools_manual_module, "score_query_documents", _mock_score_query_documents)
+    reranked, diag = tools_manual_module._apply_model_rerank(
+        state=local_state,
+        query="条件",
+        candidates=candidates,
+    )
+
+    assert diag["applied"] is True
+    assert diag["mode"] == "applied"
+    assert [item["path"] for item in reranked] == ["b.md", "c.md", "a.md"]
+    assert reranked[0]["score_reranker"] == 0.9
+    assert any("reranker=" in part for part in (reranked[0].get("rank_explain") or []))
+
+
+def test_model_rerank_falls_back_on_scoring_error(state, monkeypatch) -> None:
+    local_state = create_state(replace(state.config, manual_find_reranker_enabled=True, manual_find_reranker_top_n=3))
+    candidates = [
+        {"path": "a.md", "start_line": 1, "_rank_score": 10.0, "score": 10.0},
+        {"path": "b.md", "start_line": 1, "_rank_score": 9.0, "score": 9.0},
+        {"path": "c.md", "start_line": 1, "_rank_score": 8.0, "score": 8.0},
+    ]
+
+    def _mock_score_query_documents(*, query, documents, model_id, device, max_length, batch_size):  # type: ignore[no-untyped-def]
+        return None, RerankDiagnostics(
+            applied=False,
+            mode="import_error",
+            reason="ImportError: transformers is missing",
+            scored=0,
+        )
+
+    monkeypatch.setattr(tools_manual_module, "score_query_documents", _mock_score_query_documents)
+    reranked, diag = tools_manual_module._apply_model_rerank(
+        state=local_state,
+        query="条件",
+        candidates=candidates,
+    )
+
+    assert diag["applied"] is False
+    assert diag["mode"] == "import_error"
+    assert [item["path"] for item in reranked] == ["a.md", "b.md", "c.md"]
+
+
 def test_manual_find_multilayer_tokenization_matches_compound_japanese_query(state) -> None:
     manual_dir = state.config.manuals_root / "m9"
     manual_dir.mkdir(parents=True, exist_ok=True)
@@ -1565,11 +1621,11 @@ def test_manual_find_multilayer_tokenization_matches_alnum_cjk_compound_query(st
 
 
 def test_segment_query_term_avoids_artificial_cjk_fragments() -> None:
-    tokens = tools_manual_module._segment_query_term("がん手術給付金")
-    assert "がん手" not in tokens
-    assert "がん" in tokens
-    assert "手術" in tokens
-    assert "給付金" in tokens
+    tokens = tools_manual_module._segment_query_term("利用条件一覧")
+    assert "利用条" not in tokens
+    assert "利用" in tokens
+    assert "条件" in tokens
+    assert "一覧" in tokens
 
 
 def test_segment_query_term_splits_short_no_phrase() -> None:

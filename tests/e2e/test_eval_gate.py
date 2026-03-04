@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mcp_v2_eval.eval_manual_find import build_eval_report, evaluate_manual_find
+from mcp_v2_eval.eval_manual_find import build_eval_report, evaluate_manual_find, load_eval_cases
 
 
 def _sample_cases() -> list[dict[str, object]]:
@@ -74,7 +74,7 @@ def test_eval_gate_reports_expand_scope_application(state) -> None:
     assert isinstance(first["applied_expand_scope"], bool)
 
     report = build_eval_report(
-        Path("evals/manual_find_gold.jsonl"),
+        Path("evals/manual_find_sonylife_gold.jsonl"),
         results=out,
         top_k=1,
         expand_scope=True,
@@ -85,3 +85,13 @@ def test_eval_gate_reports_expand_scope_application(state) -> None:
     find_options = report["find_options"]
     assert find_options["requested_expand_scope"] is True
     assert isinstance(find_options["applied_expand_scope"], bool)
+
+
+def test_load_eval_cases_keeps_required_terms(tmp_path: Path) -> None:
+    dataset = tmp_path / "eval.jsonl"
+    dataset.write_text(
+        '{"query":"q","manual_id":"m1","expected_paths":["rules.md"],"required_terms":["対象外","条件"]}\n',
+        encoding="utf-8",
+    )
+    rows = load_eval_cases(dataset)
+    assert rows[0]["required_terms"] == ["対象外", "条件"]

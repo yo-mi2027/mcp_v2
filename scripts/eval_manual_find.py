@@ -22,7 +22,7 @@ from mcp_v2_server.state import create_state
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate manual_find quality with JSONL gold cases.")
-    parser.add_argument("--dataset", default="evals/manual_find_gold.jsonl", help="JSONL path for eval dataset")
+    parser.add_argument("--dataset", default="evals/manual_find_sonylife_gold.jsonl", help="JSONL path for eval dataset")
     parser.add_argument("--top-k", type=int, default=5, help="Top-k for hit_rate/precision metrics")
     parser.add_argument("--budget-time-ms", type=int, default=DEFAULT_BUDGET_TIME_MS)
     parser.add_argument("--budget-max-candidates", type=int, default=DEFAULT_BUDGET_MAX_CANDIDATES)
@@ -51,6 +51,11 @@ def _parse_args() -> argparse.Namespace:
         "--compare-claim-graph",
         action="store_true",
         help="Run two evaluations (manual_find claim_graph internals off/on) and emit a comparison report.",
+    )
+    parser.add_argument(
+        "--compare-reranker",
+        action="store_true",
+        help="Run two evaluations (final reranker off/on) and emit a comparison report.",
     )
     return parser.parse_args()
 
@@ -143,6 +148,7 @@ def main() -> int:
         int(bool(args.compare_sem_cache))
         + int(bool(args.compare_query_decomp))
         + int(bool(args.compare_claim_graph))
+        + int(bool(args.compare_reranker))
     )
     if compare_count > 1:
         print("choose only one compare mode", file=sys.stderr)
@@ -282,6 +288,46 @@ def main() -> int:
                 f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
             },
         }
+    elif args.compare_reranker:
+        baseline_report = _run_once(
+            cfg=replace(base_cfg, manual_find_reranker_enabled=False),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        reranker_report = _run_once(
+            cfg=replace(base_cfg, manual_find_reranker_enabled=True),
+            cases=cases,
+            top_k=top_k,
+            expand_scope=expand_scope,
+            include_claim_graph=include_claim_graph,
+            budget_time_ms=budget_time_ms,
+            budget_max_candidates=budget_max_candidates,
+            thresholds=thresholds,
+            dataset_path=dataset_path,
+        )
+        delta = _metric_delta(baseline_report["metrics"], reranker_report["metrics"])
+        report = {
+            "mode": "reranker_compare",
+            "baseline": baseline_report,
+            "with_reranker": reranker_report,
+            "metrics_delta": delta,
+            "comparison_summary": {
+                "baseline_passed": bool(baseline_report["pass_fail"]["all_passed"]),
+                "with_reranker_passed": bool(reranker_report["pass_fail"]["all_passed"]),
+                "p95_latency_ms_delta": delta.get("p95_latency_ms"),
+                "tokens_per_query_delta": delta.get("tokens_per_query"),
+                f"hit_rate@{top_k}_delta": delta.get(f"hit_rate@{top_k}"),
+                f"recall@{top_k}_delta": delta.get(f"recall@{top_k}"),
+                f"mrr@{top_k}_delta": delta.get(f"mrr@{top_k}"),
+                f"precision@{top_k}_delta": delta.get(f"precision@{top_k}"),
+            },
+        }
     else:
         report = _run_once(
             cfg=base_cfg,
@@ -295,7 +341,7 @@ def main() -> int:
             dataset_path=dataset_path,
         )
 
-    if args.compare_sem_cache or args.compare_query_decomp or args.compare_claim_graph:
+    if args.compare_sem_cache or args.compare_query_decomp or args.compare_claim_graph or args.compare_reranker:
         print(json.dumps(report["comparison_summary"], ensure_ascii=False, indent=2))
     else:
         print(json.dumps({"metrics": report["metrics"], "pass_fail": report["pass_fail"]}, ensure_ascii=False, indent=2))
@@ -315,6 +361,11 @@ def main() -> int:
             baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
             claim_graph_pass = bool(report["with_claim_graph"]["pass_fail"]["all_passed"])
             if not (baseline_pass and claim_graph_pass):
+                return 1
+        elif args.compare_reranker:
+            baseline_pass = bool(report["baseline"]["pass_fail"]["all_passed"])
+            reranker_pass = bool(report["with_reranker"]["pass_fail"]["all_passed"])
+            if not (baseline_pass and reranker_pass):
                 return 1
         elif not report["pass_fail"]["all_passed"]:
             return 1

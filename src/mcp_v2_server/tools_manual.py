@@ -19,6 +19,7 @@ from .manual_index import (
 )
 from .normalization import normalize_text, split_terms
 from .path_guard import normalize_relative_path, resolve_inside_root
+from .reranker import score_query_documents
 from .sparse_index import SparseIndex, bm25_scores
 from .state import AppState
 
@@ -72,6 +73,18 @@ CJK_COMPOUND_SUFFIXES = tuple(
         "条件",
         "番号",
         "支払",
+        "一覧",
+        "定義",
+        "手順",
+        "方法",
+        "対象",
+        "設定",
+        "管理",
+        "情報",
+        "機能",
+        "入力",
+        "出力",
+        "項目",
     )
 )
 CODE_TOKEN_RE = re.compile(r"^[a-z]{1,4}\d{2,6}[a-z]?$")
@@ -141,6 +154,7 @@ RELAXED_MIN_TOKEN_HIT_SUM = 3
 RELAXED_STRONG_SIGNALS = {"phrase", "code_exact", "proximity", "number_context"}
 DEFINITION_TITLE_HINTS = tuple(normalize_text(term) for term in ("定義", "基本", "支払事由", "概要"))
 ELIGIBILITY_QUERY_HINTS = tuple(normalize_text(term) for term in ("条件", "要件", "支払", "給付金", "事由"))
+MANUAL_FIND_RERANKER_MIN_CANDIDATES = 2
 CLAIM_GRAPH_STRONG_SIGNALS = {
     "phrase",
     "anchor",
@@ -2307,6 +2321,105 @@ def _apply_file_diversity_rerank(
     return selected
 
 
+def _candidate_rerank_text(*, title: str, raw_text: str, max_chars: int) -> str:
+    applied_max_chars = max(128, int(max_chars))
+    joined = "\n".join(part for part in [title.strip(), raw_text.strip()] if part).strip()
+    if len(joined) <= applied_max_chars:
+        return joined
+    return joined[:applied_max_chars]
+
+
+def _candidate_text_for_reranker(item: dict[str, Any], *, max_chars: int) -> str:
+    raw = item.get("_rerank_text")
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+    else:
+        ref = item.get("ref") or {}
+        title = str(ref.get("title") or "").strip()
+        path = str(item.get("path") or ref.get("path") or "").strip()
+        tokens = item.get("matched_tokens")
+        token_text = " ".join(str(token) for token in tokens) if isinstance(tokens, list) else ""
+        text = "\n".join(part for part in [title, token_text, path] if part).strip()
+    applied_max_chars = max(128, int(max_chars))
+    if len(text) <= applied_max_chars:
+        return text
+    return text[:applied_max_chars]
+
+
+def _apply_model_rerank(
+    *,
+    state: AppState,
+    query: str,
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    cfg = state.config
+    diagnostics: dict[str, Any] = {
+        "enabled": bool(cfg.manual_find_reranker_enabled),
+        "applied": False,
+        "mode": "disabled",
+        "reason": None,
+        "top_n": 0,
+        "scored": 0,
+        "model": str(cfg.manual_find_reranker_model),
+    }
+    if not cfg.manual_find_reranker_enabled:
+        return candidates, diagnostics
+    if len(candidates) < MANUAL_FIND_RERANKER_MIN_CANDIDATES:
+        diagnostics["mode"] = "insufficient_candidates"
+        return candidates, diagnostics
+
+    top_n = max(1, min(len(candidates), int(cfg.manual_find_reranker_top_n)))
+    pool = list(candidates[:top_n])
+    if not pool:
+        diagnostics["mode"] = "empty_pool"
+        return candidates, diagnostics
+
+    documents = [
+        _candidate_text_for_reranker(item, max_chars=cfg.manual_find_reranker_max_chars)
+        for item in pool
+    ]
+    scores, score_diag = score_query_documents(
+        query=query,
+        documents=documents,
+        model_id=cfg.manual_find_reranker_model,
+        device=cfg.manual_find_reranker_device,
+        max_length=cfg.manual_find_reranker_max_length,
+        batch_size=cfg.manual_find_reranker_batch_size,
+    )
+    diagnostics["mode"] = score_diag.mode
+    diagnostics["reason"] = score_diag.reason
+    diagnostics["scored"] = int(score_diag.scored)
+    diagnostics["top_n"] = int(top_n)
+    if scores is None:
+        return candidates, diagnostics
+
+    scored_rows: list[tuple[float, dict[str, Any]]] = []
+    for row, rerank_score in zip(pool, scores):
+        lexical_score = row.get("score_lexical")
+        if not isinstance(lexical_score, (int, float)) or isinstance(lexical_score, bool):
+            lexical_score = _candidate_rank_score(row)
+        fused_score = float(rerank_score)
+        row["_rank_score"] = fused_score
+        row["score"] = round(fused_score, 4)
+        row["score_lexical"] = round(float(lexical_score), 4)
+        row["score_fused"] = round(fused_score, 4)
+        row["score_reranker"] = round(fused_score, 4)
+        rank_explain = list(row.get("rank_explain") or [])
+        rank_explain.append(f"reranker={round(fused_score, 4)}")
+        row["rank_explain"] = rank_explain
+        scored_rows.append((fused_score, row))
+
+    scored_rows.sort(key=lambda pair: (-pair[0], *_candidate_tie_break_key(pair[1])))
+    reranked = [row for _, row in scored_rows]
+    diagnostics["applied"] = True
+    return reranked + list(candidates[top_n:]), diagnostics
+
+
+def _strip_internal_candidate_fields(candidates: list[dict[str, Any]]) -> None:
+    for item in candidates:
+        item.pop("_rerank_text", None)
+
+
 def _default_scan_next_action(
     manual_id: str | None,
     candidates: list[dict[str, Any]],
@@ -2446,6 +2559,7 @@ def _run_find_pass(
     proximity_bonus_near = max(0.0, float(state.config.lexical_proximity_bonus_near))
     proximity_bonus_far = max(0.0, float(state.config.lexical_proximity_bonus_far))
     length_penalty_weight = max(0.0, float(state.config.lexical_length_penalty_weight))
+    reranker_max_chars = max(128, int(state.config.manual_find_reranker_max_chars))
 
     manuals_fp = _manuals_fingerprint(state, manual_ids)
     sparse_index, index_rebuilt = state.sparse_index.get_or_build(manual_ids=manual_ids, fingerprint=manuals_fp)
@@ -2747,6 +2861,11 @@ def _run_find_pass(
                     "token_hits": {term: token_hits.get(term, 0) for term in matched_tokens},
                     "match_coverage": round(match_coverage_ratio, 4),
                     "rank_explain": rank_explain,
+                    "_rerank_text": _candidate_rerank_text(
+                        title=str(doc.title or ""),
+                        raw_text=str(doc.raw_text or ""),
+                        max_chars=reranker_max_chars,
+                    ),
                 }
                 if applied_required_terms:
                     item["required_terms"] = list(applied_required_terms)
@@ -2865,6 +2984,11 @@ def _run_find_pass(
                 "token_hits": {term: token_hits.get(term, 0) for term in matched_tokens},
                 "match_coverage": round(_match_coverage_ratio(matched_terms, coverage_groups), 4),
                 "rank_explain": exploration_rank_explain,
+                "_rerank_text": _candidate_rerank_text(
+                    title=str(doc.title or ""),
+                    raw_text=str(doc.raw_text or ""),
+                    max_chars=reranker_max_chars,
+                ),
             }
             if applied_required_terms:
                 item["required_terms"] = list(applied_required_terms)
@@ -3914,6 +4038,15 @@ def manual_find(
     sem_cache_mode = "miss" if use_semantic_cache else "bypass"
     sem_cache_score: float | None = None
     latency_saved_ms: int | None = None
+    reranker_diagnostics: dict[str, Any] = {
+        "enabled": bool(state.config.manual_find_reranker_enabled),
+        "applied": False,
+        "mode": "disabled",
+        "reason": None,
+        "top_n": 0,
+        "scored": 0,
+        "model": str(state.config.manual_find_reranker_model),
+    }
     ensure(
         _manual_exists(state.config.manuals_root, applied_manual_id),
         "not_found",
@@ -4284,6 +4417,13 @@ def manual_find(
             fusion_debug_rows = list(fusion_debug_by_key.values())
     if dynamic_cutoff_applied and cutoff_reason is None:
         cutoff_reason = "dynamic_cutoff"
+    candidates, reranker_diagnostics = _apply_model_rerank(
+        state=state,
+        query=query,
+        candidates=candidates,
+    )
+    if bool(reranker_diagnostics.get("applied")):
+        scoring_mode = f"{scoring_mode}+reranker"
     if fusion_debug_rows:
         fusion_debug_by_key = {
             str(item.get("candidate_key") or ""): dict(item)
@@ -4314,8 +4454,12 @@ def manual_find(
     for item in candidates:
         final_score = _candidate_rank_score(item)
         item["score"] = round(final_score, 4)
-        item["score_lexical"] = round(final_score, 4)
-        item["score_fused"] = round(final_score, 4)
+        score_lexical = item.get("score_lexical")
+        if not isinstance(score_lexical, (int, float)) or isinstance(score_lexical, bool):
+            item["score_lexical"] = round(final_score, 4)
+        score_fused = item.get("score_fused")
+        if not isinstance(score_fused, (int, float)) or isinstance(score_fused, bool):
+            item["score_fused"] = round(final_score, 4)
     claim_graph_enabled = (
         bool(state.config.manual_find_claim_graph_enabled)
         and not applied_compact
@@ -4393,6 +4537,7 @@ def manual_find(
                 "gap_hint": "no candidates matched the current query scope",
             }
         )
+    _strip_internal_candidate_fields(candidates)
 
     trace_payload = {
         "query": query,
@@ -4418,6 +4563,13 @@ def manual_find(
             "required_top_hits": required_top_hits,
             "selected_gate": selected_gate,
             "gate_selection_reason": gate_selection_reason,
+            "reranker_enabled": bool(reranker_diagnostics.get("enabled")),
+            "reranker_applied": bool(reranker_diagnostics.get("applied")),
+            "reranker_mode": str(reranker_diagnostics.get("mode") or "disabled"),
+            "reranker_reason": reranker_diagnostics.get("reason"),
+            "reranker_model": str(reranker_diagnostics.get("model") or state.config.manual_find_reranker_model),
+            "reranker_top_n": int(reranker_diagnostics.get("top_n") or 0),
+            "reranker_scored": int(reranker_diagnostics.get("scored") or 0),
         },
         "gate_runs": gate_runs,
         "fusion_debug": fusion_debug_rows,
@@ -4516,6 +4668,13 @@ def manual_find(
         "required_top_hits": required_top_hits,
         "selected_gate": selected_gate,
         "gate_selection_reason": gate_selection_reason,
+        "reranker_enabled": bool(reranker_diagnostics.get("enabled")),
+        "reranker_applied": bool(reranker_diagnostics.get("applied")),
+        "reranker_mode": str(reranker_diagnostics.get("mode") or "disabled"),
+        "reranker_reason": reranker_diagnostics.get("reason"),
+        "reranker_model": str(reranker_diagnostics.get("model") or state.config.manual_find_reranker_model),
+        "reranker_top_n": int(reranker_diagnostics.get("top_n") or 0),
+        "reranker_scored": int(reranker_diagnostics.get("scored") or 0),
         "sem_cache_used": use_semantic_cache,
         "sem_cache_hit": sem_cache_hit,
         "sem_cache_mode": sem_cache_mode,
@@ -4661,6 +4820,9 @@ def manual_hits(
             score_fused = item.get("score_fused")
             if isinstance(score_fused, (int, float)) and not isinstance(score_fused, bool):
                 compact_item["score_fused"] = round(float(score_fused), 4)
+            score_reranker = item.get("score_reranker")
+            if isinstance(score_reranker, (int, float)) and not isinstance(score_reranker, bool):
+                compact_item["score_reranker"] = round(float(score_reranker), 4)
             matched_tokens = item.get("matched_tokens")
             if isinstance(matched_tokens, list) and matched_tokens:
                 compact_item["matched_tokens"] = matched_tokens

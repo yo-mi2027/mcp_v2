@@ -153,6 +153,13 @@ Output:
     "required_top_hits": "number",
     "selected_gate": "single|single_base|single_required|g0|g_req",
     "gate_selection_reason": "string | null",
+    "reranker_enabled": "boolean",
+    "reranker_applied": "boolean",
+    "reranker_mode": "disabled|insufficient_candidates|empty_pool|import_error|runtime_error|invalid_scores|applied",
+    "reranker_reason": "string | null",
+    "reranker_model": "string",
+    "reranker_top_n": "number",
+    "reranker_scored": "number",
     "sem_cache_used": "boolean",
     "sem_cache_hit": "boolean",
     "sem_cache_mode": "bypass|miss|exact|semantic|guard_revalidate",
@@ -295,14 +302,19 @@ Output:
 - cache hit でも `summary.gap_count/conflict_count` が閾値（`SEM_CACHE_MAX_SUMMARY_GAP/SEM_CACHE_MAX_SUMMARY_CONFLICT`）を超える場合は再探索する。
 - 非compact `manual_find` は `applied.sem_cache_*` 診断（used/hit/mode/score/latency_saved_ms）を返す。
 - 公開MCPツール（`app.py`）の compact `manual_find` は `applied` を返さないため、`sem_cache_*` 診断は返さない。
-- 内部 `trace_payload` / Semantic Cache 保存payloadでは、required/gate 診断（`required_*`, `selected_gate`, `gate_selection_reason`）は `applied` に集約して保持し、トップレベルへ重複保存しない。
+- 内部 `trace_payload` / Semantic Cache 保存payloadでは、required/gate/reranker 診断（`required_*`, `selected_gate`, `gate_selection_reason`, `reranker_*`）は `applied` に集約して保持し、トップレベルへ重複保存しない。
 - 旧形式trace（トップレベルに同診断キーを持つpayload）を読み出した場合は、実装側で `applied` へ後方互換補完して返却する。
 - `budget.time_ms` 既定値は `60000`、`budget.max_candidates` 既定値は `200`。
 - `budget.time_ms` と `budget.max_candidates` は整数かつ `>= 1`。
 - `manual_find` は動的カットオフを適用し、返却候補数は `min(budget.max_candidates, 50)` を上限として score/coverage に応じてさらに縮小しうる。
 - 最終ランキングでは同一 `path` の過度な集中を抑える多様性リランキング（同一pathへの減衰）を適用する。
+- `MANUAL_FIND_RERANKER_ENABLED=true` の場合、最終ランキングの上位 `min(len(candidates), MANUAL_FIND_RERANKER_TOP_N)` に対してモデルrerankを適用する（retrieve-then-rerank）。
+- rerank時は `score_fused` をモデルスコアで更新し、`score_lexical` はlexical系スコアを保持する。`rank_explain` に `reranker=...` を追記する。
+- reranker初期化/推論に失敗した場合は lexical順位へ自動フォールバックし、理由は `applied.reranker_mode` / `applied.reranker_reason` に記録する。
+- reranker実行には `transformers` と `torch` が必要。依存未導入時は `applied.reranker_mode=import_error` で lexical順位を返す。
 - 整数変換不能値と `true/false` は `invalid_parameter`。
 - `manual_hits(kind="candidates")` の各 item は `matched_tokens` / `token_hits` / `match_coverage` / `rank_explain` を含みうる。
+- 非compact `manual_hits(kind="candidates")` の item は `score_lexical` / `score_fused` に加えて、rerank適用時のみ `score_reranker` を含みうる。
 
 ## 5. `manual_hits`
 

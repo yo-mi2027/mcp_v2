@@ -60,6 +60,13 @@ class Config:
     manual_find_query_decomp_rrf_k: int
     manual_find_query_decomp_base_weight: float
     manual_find_claim_graph_enabled: bool
+    manual_find_reranker_enabled: bool
+    manual_find_reranker_model: str
+    manual_find_reranker_top_n: int
+    manual_find_reranker_max_length: int
+    manual_find_reranker_max_chars: int
+    manual_find_reranker_batch_size: int
+    manual_find_reranker_device: str
     manual_find_scan_hard_cap: int
     manual_find_per_file_candidate_cap: int
     manual_find_file_prescan_enabled: bool
@@ -109,6 +116,13 @@ class Config:
             manual_find_query_decomp_rrf_k=_env_int("MANUAL_FIND_QUERY_DECOMP_RRF_K", 60),
             manual_find_query_decomp_base_weight=_env_float("MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT", 0.30),
             manual_find_claim_graph_enabled=_env_bool("MANUAL_FIND_CLAIM_GRAPH_ENABLED", True),
+            manual_find_reranker_enabled=_env_bool("MANUAL_FIND_RERANKER_ENABLED", False),
+            manual_find_reranker_model=os.getenv("MANUAL_FIND_RERANKER_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
+            manual_find_reranker_top_n=_env_int("MANUAL_FIND_RERANKER_TOP_N", 40),
+            manual_find_reranker_max_length=_env_int("MANUAL_FIND_RERANKER_MAX_LENGTH", 512),
+            manual_find_reranker_max_chars=_env_int("MANUAL_FIND_RERANKER_MAX_CHARS", 2000),
+            manual_find_reranker_batch_size=_env_int("MANUAL_FIND_RERANKER_BATCH_SIZE", 8),
+            manual_find_reranker_device=os.getenv("MANUAL_FIND_RERANKER_DEVICE", "auto"),
             manual_find_scan_hard_cap=_env_int("MANUAL_FIND_SCAN_HARD_CAP", 5000),
             manual_find_per_file_candidate_cap=_env_int("MANUAL_FIND_PER_FILE_CANDIDATE_CAP", 8),
             manual_find_file_prescan_enabled=_env_bool("MANUAL_FIND_FILE_PRESCAN_ENABLED", True),

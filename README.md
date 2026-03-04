@@ -227,12 +227,18 @@ uv run pytest -q
 
 ## 11. Eval駆動RAG（manual_find）実行
 
-評価データセット（30問）は `evals/manual_find_gold.jsonl` にあります。  
+評価データセット（30問）は `evals/manual_find_sonylife_gold.jsonl`（`manual_id="ソニー生命"` 固定）です。  
 次のコマンドで評価を実行できます（結果は標準出力のみで、ファイル保存しません）。
 
 ```bash
 source .venv/bin/activate
 python scripts/eval_manual_find.py
+```
+
+任意データセットを使う場合:
+
+```bash
+python scripts/eval_manual_find.py --dataset evals/manual_find_sonylife_gold.jsonl
 ```
 
 閾値をCIで強制したい場合:
@@ -264,6 +270,19 @@ python scripts/eval_manual_find.py --compare-query-decomp
 
 - `MANUAL_FIND_QUERY_DECOMP_ENABLED=false`（baseline）
 - `MANUAL_FIND_QUERY_DECOMP_ENABLED=true`（with_query_decomp）
+
+最終reranker（retrieve then rerank）の有無を比較する場合:
+
+```bash
+python scripts/eval_manual_find.py --compare-reranker
+```
+
+比較モードでは次を同一条件で2回実行します。
+
+- `MANUAL_FIND_RERANKER_ENABLED=false`（baseline）
+- `MANUAL_FIND_RERANKER_ENABLED=true`（with_reranker）
+
+`MANUAL_FIND_RERANKER_ENABLED=true` で実運用する場合は `transformers` と `torch` が必要です（未導入時は自動でBM25順にフォールバックします）。
 
 ## 12. ディレクトリ構成
 
@@ -308,6 +327,13 @@ python scripts/eval_manual_find.py --compare-query-decomp
 - `MANUAL_FIND_QUERY_DECOMP_MAX_SUB_QUERIES` (default: `3`)
 - `MANUAL_FIND_QUERY_DECOMP_RRF_K` (default: `60`)
 - `MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT` (default: `0.30`, `0.0` でRRF寄り、`1.0` でbase寄り)
+- `MANUAL_FIND_RERANKER_ENABLED` (default: `false`)
+- `MANUAL_FIND_RERANKER_MODEL` (default: `Qwen/Qwen3-Reranker-0.6B`)
+- `MANUAL_FIND_RERANKER_TOP_N` (default: `40`)
+- `MANUAL_FIND_RERANKER_MAX_LENGTH` (default: `512`)
+- `MANUAL_FIND_RERANKER_MAX_CHARS` (default: `2000`)
+- `MANUAL_FIND_RERANKER_BATCH_SIZE` (default: `8`)
+- `MANUAL_FIND_RERANKER_DEVICE` (default: `auto`)
 - `MANUAL_FIND_SCAN_HARD_CAP` (default: `5000`)
 - `MANUAL_FIND_PER_FILE_CANDIDATE_CAP` (default: `8`)
 - `MANUAL_FIND_FILE_PRESCAN_ENABLED` (default: `true`)

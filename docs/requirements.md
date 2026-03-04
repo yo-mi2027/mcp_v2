@@ -86,8 +86,13 @@
   - `manual_id`（必須）
   - `expected_paths`（期待される根拠パス群）
   - `forbidden_paths`（誤検知として扱うパス群、任意）
+  - `required_terms`（1〜2語を推奨、任意）
 - 評価実行は `manual_find` -> `manual_hits(kind="candidates")` を基本導線とする。
-- 比較評価では `SEM_CACHE_ENABLED=false/true` の2条件を同一データセット・同一設定で実行し、差分を比較する。
+- 比較評価では次の2条件A/Bを同一データセット・同一設定で実行し、差分を比較する。
+  - `SEM_CACHE_ENABLED=false/true`（`--compare-sem-cache`）
+  - `MANUAL_FIND_QUERY_DECOMP_ENABLED=false/true`（`--compare-query-decomp`）
+  - `MANUAL_FIND_CLAIM_GRAPH_ENABLED=false/true`（`--compare-claim-graph`）
+  - `MANUAL_FIND_RERANKER_ENABLED=false/true`（`--compare-reranker`）
 - 評価指標は少なくとも次を算出する:
   - `hit_rate@k`（`expected_paths` が上位k件に含まれる割合）
   - `recall@k`（`expected_paths` の回収率）
@@ -121,6 +126,7 @@
 - `manual_find` の軽量統計は `ADAPTIVE_STATS_PATH` に永続化する。
 - 統計には本文を保存しない（メタ情報のみ）。
 - `manual_find` 統計には少なくとも `sem_cache_hit`, `sem_cache_mode`, `sem_cache_score`, `latency_saved_ms`, `scoring_mode` を含める。
+- `scoring_mode` は suffix 付きの合成値（例: `gate_rrf+reranker`）を取りうる。
 - `TraceStore` / Semantic Cache に保存する `manual_find` の `trace_payload` は、required/gate診断を `applied` 配下へ集約し、トップレベル重複を避ける。
 - Eval実行結果は再現可能な形式（JSON/JSONL）で保存し、比較可能なサマリを生成する。
 - Eval結果には少なくとも次を含める: 実行日時、評価データセットID（またはハッシュ）、指標値、しきい値判定結果。
@@ -131,6 +137,7 @@
 - stdio 実行を標準運用とする。
 - 既定設定で開発環境起動できること。
 - 単体テストとE2Eテストが通ること。
+- reranker有効化時（`MANUAL_FIND_RERANKER_ENABLED=true`）のみ、追加依存（`transformers`, `torch`）を要求する。
 - Evalジョブは通常運用パスと分離し、運用時の応答性能に恒常的な影響を与えないこと。
 - 同一データセット・同一コードで評価を再実行した場合、指標差分が説明可能な範囲に収まること。
 
@@ -154,6 +161,7 @@
 ## 9. Eval初期運用プロファイル
 
 - 評価データセット初期母数は `30問` とする。
+- 現行の既定データセットは `evals/manual_find_sonylife_gold.jsonl`（`manual_id="ソニー生命"` 固定）とする。
 - 初期配分は `definition/procedure/eligibility/exceptions/compare/unknown` を各 `5問` 目安とする。
 - ゴールド正解は `path` 単位で定義し、`start_line` は参考情報（非ゲート）として扱う。
 - 評価時の `manual_find` 実行条件は次で固定する:
@@ -166,7 +174,11 @@
   - 以後は hard fail（閾値未達でCI失敗）
 - Eval結果はファイル保存せず、CLI標準出力で確認する。
 - Semantic Cache比較時は `scripts/eval_manual_find.py --compare-sem-cache` を利用し、`baseline` と `with_sem_cache` の差分 (`metrics_delta`) を記録する。
+- Query decomposition比較時は `scripts/eval_manual_find.py --compare-query-decomp` を利用し、`baseline` と `with_query_decomp` の差分 (`metrics_delta`) を記録する。
+- claim graph比較時は `scripts/eval_manual_find.py --compare-claim-graph` を利用し、`baseline` と `with_claim_graph` の差分 (`metrics_delta`) を記録する。
+- reranker比較時は `scripts/eval_manual_find.py --compare-reranker` を利用し、`baseline` と `with_reranker` の差分 (`metrics_delta`) を記録する。
 - `sem_cache_compare` の比較サマリには少なくとも `tokens_per_query_delta` と cache 効率指標（例: `sem_cache_hit_rate`, `sem_cache_exact_hit_rate`, 推定短縮時間差分）を含める。
+- `reranker_compare` の比較サマリには少なくとも `mrr@k` / `recall@k` / `precision@k` / `p95_latency_ms` の差分を含める。
 - 現行運用プロファイル（現在使用しているPCを含む標準環境）では `SEM_CACHE_EMBEDDING_PROVIDER=none` を固定運用とし、embedding provider は導入しない。
 - したがって当面の比較は正規化後 exact cache 中心の評価として扱う（`semantic` hit は通常 0）。
 - `SEM_CACHE_SIM_THRESHOLD` は互換性維持・将来拡張余地のために残している設定値であり、現行運用での導入ロードマップを意味しない。

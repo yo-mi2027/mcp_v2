@@ -47,6 +47,8 @@
 - BM25 を基礎に query coverage 補正（`SPARSE_QUERY_COVERAGE_WEIGHT` / `LEXICAL_COVERAGE_WEIGHT`）を加点
 - Query Decomposition + RRF（`MANUAL_FIND_QUERY_DECOMP_ENABLED`）は既定ON。比較構文に一致した場合のみ sub-query 分解を実行し、部分失敗は許容して継続する。結合時は `base` と `rrf` を正規化混合（`MANUAL_FIND_QUERY_DECOMP_BASE_WEIGHT`）して再スコアする
 - 最終ランキングで同一 `path` の過度な集中を抑える多様性リランキングを適用
+- `MANUAL_FIND_RERANKER_ENABLED=true` の場合、最終候補上位（`MANUAL_FIND_RERANKER_TOP_N`）のみモデルrerankを適用する（retrieve-then-rerank）
+- reranker失敗時（依存未導入/初期化失敗/推論失敗）は lexical順位へ自動フォールバックし、`applied.reranker_*` に理由を記録する
 - 探索中の候補走査量には上限を設ける（詳細閾値・式は実装/仕様を参照）
 - 返却直前に動的カットオフを適用し、候補数を縮小しうる（詳細上限は `spec_manuals.md`）
 - lexical 一致がある候補のみ採用（`exceptions` 単独では採用しない）
@@ -99,7 +101,7 @@
 - `sem_cache_mode`: `bypass|miss|exact|semantic|guard_revalidate`
 - `sem_cache_score`: semantic 類似度スコア（exact/miss時は `null` 可）
 - `latency_saved_ms`: cache hit 時の推定短縮時間（ms）
-- `scoring_mode`: `lexical|query_decomp_rrf|gate_rrf|cache`
+- `scoring_mode`: `lexical|query_decomp_rrf|gate_rrf|cache` に加えて、rerank適用時は `+reranker` suffix を取りうる（例: `gate_rrf+reranker`）
 
 現状メモ:
 

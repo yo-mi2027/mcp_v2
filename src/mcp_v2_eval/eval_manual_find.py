@@ -55,6 +55,12 @@ def load_eval_cases(path: Path) -> list[dict[str, Any]]:
         forbidden_paths = payload.get("forbidden_paths", [])
         if not isinstance(forbidden_paths, list) or not all(isinstance(p, str) for p in forbidden_paths):
             raise ValueError(f"line {idx} forbidden_paths must be string list")
+        required_terms = payload.get("required_terms")
+        if required_terms is not None:
+            if not isinstance(required_terms, list) or not all(
+                isinstance(term, str) and term.strip() for term in required_terms
+            ):
+                raise ValueError(f"line {idx} required_terms must be non-empty string list")
         facet = payload.get("facet", "unknown")
         if not isinstance(facet, str):
             raise ValueError(f"line {idx} facet must be string")
@@ -71,6 +77,7 @@ def load_eval_cases(path: Path) -> list[dict[str, Any]]:
                 "manual_id": manual_id.strip(),
                 "expected_paths": expected_paths,
                 "forbidden_paths": forbidden_paths,
+                "required_terms": required_terms,
             }
         )
     if not rows:
