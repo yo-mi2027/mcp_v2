@@ -23,10 +23,10 @@ S80_3	特定疾病診断特約が付加？	S80_4	S80_4	FLAG_特定疾病=ON	FLAG
 S80_4	抗がん剤治療特約が付加？	S80_5	S80_5	FLAG_抗がん剤=ON	FLAG_抗がん剤=OFF
 S80_5	女性医療特約が付加？	S80_6	S80_6	FLAG_女性医療=ON	FLAG_女性医療=OFF
 S80_6	がん入院特約が付加？	S80_CONT	S80_CONT	FLAG_がん入院=ON	FLAG_がん入院=OFF
-S80_CONT	FLAG_成人医療=ONか？	→R01_成人医療特約_compressed.md	S80_CONT_2	R01実行	-
-S80_CONT_2	FLAG_先進医療=ONか？	→R03_先進医療特約_compressed.md	S80_CONT_3	R03実行	-
-S80_CONT_3	FLAG_特定疾病=ONか？	→R04_特定疾病診断特約_compressed.md	S80_CONT_4	R04実行	-
-S80_CONT_4	FLAG_抗がん剤=ONか？	→R05_抗がん剤治療特約_compressed.md	S80_CONT_5	R05実行	-
-S80_CONT_5	FLAG_女性医療=ONか？	→R02_女性医療特約_compressed.md	S80_CONT_6	R02実行	-
+S80_CONT	FLAG_成人医療=ONか？	→R01_成人医療特約.md	S80_CONT_2	R01実行	-
+S80_CONT_2	FLAG_先進医療=ONか？	→R03_先進医療特約.md	S80_CONT_3	R03実行	-
+S80_CONT_3	FLAG_特定疾病=ONか？	→R04_特定疾病診断特約.md	S80_CONT_4	R04実行	-
+S80_CONT_4	FLAG_抗がん剤=ONか？	→R05_抗がん剤治療特約.md	S80_CONT_5	R05実行	-
+S80_CONT_5	FLAG_女性医療=ONか？	→R02_女性医療特約.md	S80_CONT_6	R02実行	-
 S80_CONT_6	FLAG_がん入院=ONか？	がん入院特約フロー(※別商品)	S80_ALL_END	-	-
 S80_ALL_END	【全処理完了】	-	-	処理状態=完了;全フェーズ=完了	=
