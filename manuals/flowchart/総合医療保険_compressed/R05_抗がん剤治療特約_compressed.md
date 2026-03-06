@@ -1,0 +1,13 @@
+# R05_抗がん剤治療特約（簡易版）
+# LOAD条件: 01a_final S80_CONT_4 FLAG_抗がん剤=ON / 挿入: S80_CONT_4=YES / 復帰: 01a_final:S80_CONT_5
+# 配置: 総合医療保険_compressed内の派生ルート
+# 支払事由: 公的医療保険対象の抗がん剤投与を受けた場合の給付金
+# 前提: 主契約判定完了後
+# 原本: flowchart/抗がん剤治療特約/抗がん剤治療特約TSV_簡易版.md
+# ※抗がん剤治療の支払対象ケースが追加された場合は詳細版に拡張する
+step_id	question	yes_next	no_next	yes_effect	no_effect
+SK_INIT	抗がん剤治療特約の判定を開始する	SK_CHK1	SK_CHK1	抗がん剤治療特約判定=開始	抗がん剤治療特約判定=開始
+SK_CHK1	抗がん剤治療特約が付加されているか？	SK_CHK2	SK_END	抗がん剤治療特約=付加あり	抗がん剤治療特約=付加なし→スキップ
+SK_CHK2	診断書に抗がん剤治療（公的医療保険対象の抗がん剤投与）の記録があるか？[AI]	SK_DETAIL	SK_END	抗がん剤治療=あり→詳細判定へ	抗がん剤治療=なし→対象外
+SK_DETAIL	【未実装】詳細判定が必要な場合は詳細版TSVを参照すること	SK_END	SK_END	詳細判定=要（詳細版参照）	詳細判定=要（詳細版参照）
+SK_END	【抗がん剤治療特約判定完了】→01a_final:S80_CONT_5へ復帰	→01a_final:S80_CONT_5	→01a_final:S80_CONT_5	抗がん剤治療特約=判定完了	抗がん剤治療特約=判定完了

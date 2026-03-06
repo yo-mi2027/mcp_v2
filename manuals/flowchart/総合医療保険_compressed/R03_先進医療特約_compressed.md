@@ -1,0 +1,14 @@
+# R03_先進医療特約（簡易版）
+# LOAD条件: 01a_final S80_CONT_2 FLAG_先進医療=ON / 挿入: S80_CONT_2=YES / 復帰: 01a_final:S80_CONT_3
+# 配置: 総合医療保険_compressed内の派生ルート
+# 支払事由: 先進医療技術を受療した場合の給付金
+# 前提: 主契約判定完了後
+# 原本: flowchart/先進医療特約/先進医療特約TSV_簡易版.md
+# ※先進医療受療の支払対象ケースが追加された場合は詳細版に拡張する
+step_id	question	yes_next	no_next	yes_effect	no_effect
+SV_INIT	先進医療特約の判定を開始する	SV_CHK1	SV_CHK1	先進医療特約判定=開始	先進医療特約判定=開始
+SV_CHK1	先進医療特約が付加されているか？	SV_CHK2	SV_END	先進医療特約=付加あり	先進医療特約=付加なし→スキップ
+SV_CHK2	特約は消滅していないか？（通算支払限度到達による消滅確認）	SV_CHK3	SV_END	先進医療特約=有効	先進医療特約=消滅済→対象外
+SV_CHK3	診断書に先進医療の受療記録があるか？[AI]	SV_DETAIL	SV_END	先進医療受療=あり→詳細判定へ	先進医療受療=なし→対象外
+SV_DETAIL	【未実装】詳細判定が必要な場合は詳細版TSVを参照すること	SV_END	SV_END	詳細判定=要（詳細版参照）	詳細判定=要（詳細版参照）
+SV_END	【先進医療特約判定完了】→01a_final:S80_CONT_3へ復帰	→01a_final:S80_CONT_3	→01a_final:S80_CONT_3	先進医療特約=判定完了	先進医療特約=判定完了

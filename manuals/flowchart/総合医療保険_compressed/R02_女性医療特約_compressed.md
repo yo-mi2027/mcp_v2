@@ -1,0 +1,14 @@
+# R02_女性医療特約（簡易版）
+# LOAD条件: 01a_final S80_CONT_5 FLAG_女性医療=ON / 挿入: S80_CONT_5=YES / 復帰: 01a_final:S80_CONT_6
+# 配置: 総合医療保険_compressed内の派生ルート
+# 支払事由: 女性特定疾病（別表33）の治療を目的とする入院・手術給付金
+# 前提: 主契約で前提条件OKとなった入院・手術情報を参照
+# 原本: flowchart/女性医療特約/女性医療特約TSV_簡易版.md
+# ※支払事由該当ケースが追加された場合は詳細版に拡張する
+step_id	question	yes_next	no_next	yes_effect	no_effect
+SF_INIT	女性医療特約の判定を開始する	SF_CHK1	SF_CHK1	女性医療特約判定=開始	女性医療特約判定=開始
+SF_CHK1	女性医療特約が付加されているか？	SF_CHK2	SF_END	女性医療特約=付加あり	女性医療特約=付加なし→スキップ
+SF_CHK2	被保険者は女性か？	SF_CHK3	SF_END	被保険者=女性	被保険者=男性→対象外
+SF_CHK3	入院または手術の原因が女性特定疾病（別表33）に該当するか？[AI]	SF_DETAIL	SF_END	女性特定疾病=該当→詳細判定へ	女性特定疾病=非該当→対象外
+SF_DETAIL	【未実装】詳細判定が必要な場合は詳細版TSVを参照すること	SF_END	SF_END	詳細判定=要（詳細版参照）	詳細判定=要（詳細版参照）
+SF_END	【女性医療特約判定完了】→01a_final:S80_CONT_6へ復帰	→01a_final:S80_CONT_6	→01a_final:S80_CONT_6	女性医療特約=判定完了	女性医療特約=判定完了
